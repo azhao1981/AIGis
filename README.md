@@ -1,7 +1,28 @@
 
+## what is aigis
 
-### 项目结构
 
+## 使用方式
+
+### 启动服务 (默认 0.0.0.0:8080)
+  ./bin/aigis serve
+
+### 指定端口
+  ./bin/aigis serve -p 3000
+
+### 使用环境变量
+  AIGIS_SERVER_PORT=9000 ./bin/aigis serve
+
+### 使用自定义配置文件
+  ./bin/aigis --config /path/to/config.yaml serve
+
+  配置优先级
+
+  环境变量 (AIGIS_*) > 命令行参数 > config.yaml
+
+## 项目结构
+
+```bash
   aigis/
   ├── bin/aigis               # 编译产物
   ├── cmd/aigis/
@@ -19,21 +40,4 @@
   │   └── config.yaml          # 默认配置
   ├── go.mod
   └── go.sum
-
-  使用方式
-
-### 启动服务 (默认 0.0.0.0:8080)
-  ./bin/aigis serve
-
-### 指定端口
-  ./bin/aigis serve -p 3000
-
-### 使用环境变量
-  AIGIS_SERVER_PORT=9000 ./bin/aigis serve
-
-### 使用自定义配置文件
-  ./bin/aigis --config /path/to/config.yaml serve
-
-  配置优先级
-
-  环境变量 (AIGIS_*) > 命令行参数 > config.yaml
+```
