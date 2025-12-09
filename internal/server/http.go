@@ -11,14 +11,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/viper"
+
 	"aigis/internal/core"
 	"aigis/internal/core/processors"
+	"aigis/internal/core/providers"
 )
 
 // HTTPServer extends the basic server with gateway functionality
 type HTTPServer struct {
 	*Server
 	pipeline *core.Pipeline
+	provider core.Provider
 }
 
 // NewHTTPServer creates a new HTTP server with gateway capabilities
@@ -31,9 +35,19 @@ func NewHTTPServer(addr string) *HTTPServer {
 	// Register PII Guard processor
 	pipeline.AddProcessor(processors.NewPIIGuard())
 
+	// Initialize OpenAI provider from config
+	apiKey := viper.GetString("openai.api_key")
+	baseURL := viper.GetString("openai.base_url")
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+
+	provider := providers.NewOpenAIProvider(apiKey, baseURL)
+
 	return &HTTPServer{
 		Server:   baseServer,
 		pipeline: pipeline,
+		provider: provider,
 	}
 }
 
@@ -108,16 +122,22 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 	ctx := core.NewGatewayContext(r.Context())
 	ctx.RequestID = generateRequestID()
 
-	// Execute the pipeline for request processing
+	// Execute the pipeline for request processing (PII redaction)
 	if err := s.pipeline.ExecuteRequest(ctx, &req); err != nil {
 		http.Error(w, fmt.Sprintf("Pipeline error: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// For MVP: return the modified request as JSON to verify redaction
-	// In a real implementation, this would forward to an LLM provider
+	// Forward the cleaned request to OpenAI
+	resp, err := s.provider.Send(ctx, &req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Provider error: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	// Return the real response from OpenAI
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(req)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // generateRequestID generates a simple request ID for tracking
