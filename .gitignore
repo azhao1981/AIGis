@@ -1,8 +1,10 @@
 .env
+.envrc
 log
 logs
 .gz
 .claude
+CLAUDE.md
 bin
 .go-version
 
