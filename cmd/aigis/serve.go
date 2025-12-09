@@ -30,7 +30,7 @@ var serveCmd = &cobra.Command{
 	},
 }
 
-func init() {
+func SetupServeCmd() {
 	rootCmd.AddCommand(serveCmd)
 
 	serveCmd.Flags().IntP("port", "p", 8080, "Server port")

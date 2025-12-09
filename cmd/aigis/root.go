@@ -24,7 +24,7 @@ func Execute() {
 	}
 }
 
-func init() {
+func SetupRootCmd() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./configs/config.yaml)")
