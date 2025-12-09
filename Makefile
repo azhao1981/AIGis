@@ -7,12 +7,11 @@ MAIN_PATH=cmd/aigis/main.go
 CONFIG_PATH=configs/config.yaml
 
 # Go 相关变量
-GOTOOLCHAIN=local
-GO=GOTOOLCHAIN=$(GOTOOLCHAIN) go
+GO=go
 GOFMT=gofmt
 GOLINT=golint
-GOVET=GOTOOLCHAIN=$(GOTOOLCHAIN) go vet
-GOTEST=GOTOOLCHAIN=$(GOTOOLCHAIN) go test
+GOVET=go vet
+GOTEST=go test
 
 # 检查 Go 版本
 GO_VERSION := $(shell $(GO) version | grep -o 'go[0-9]\+\.[0-9]\+' | sed 's/go//')
@@ -43,6 +42,17 @@ build:
 	@mkdir -p $(BUILD_DIR)
 	$(GO) build $(BUILD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/aigis
 	@echo "构建完成: $(BUILD_DIR)/$(BINARY_NAME)"
+
+# 停止服务
+.PHONY: kill
+kill:
+	@echo "停止运行中的 $(BINARY_NAME) 服务..."
+	@if pgrep -f "aigis serve" > /dev/null; then \
+		pkill -f "aigis serve"; \
+		echo "服务已停止"; \
+	else \
+		echo "没有找到运行中的 $(BINARY_NAME) 服务"; \
+	fi
 
 # 运行服务
 .PHONY: run
@@ -168,6 +178,8 @@ help:
 	@echo "  build        - 构建二进制文件"
 	@echo "  run          - 构建并运行服务（默认端口）"
 	@echo "  run-port     - 构建并运行服务（使用 PORT 变量指定端口）"
+	@echo "  restart      - 重启服务（先停止再启动）"
+	@echo "  kill         - 停止运行中的服务"
 	@echo "  dev          - 开发模式运行（需要 air）"
 	@echo "  test         - 运行测试"
 	@echo "  test-coverage- 运行测试并生成覆盖率报告"
@@ -184,5 +196,6 @@ help:
 	@echo ""
 	@echo "示例:"
 	@echo "  make run PORT=3000    # 在端口 3000 运行服务"
+	@echo "  make kill              # 停止运行中的服务"
 	@echo "  make dev              # 开发模式"
 	@echo "  make test-coverage    # 生成测试覆盖率报告"

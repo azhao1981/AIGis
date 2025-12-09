@@ -25,7 +25,7 @@ var serveCmd = &cobra.Command{
 		}
 
 		addr := fmt.Sprintf("%s:%d", host, port)
-		srv := server.New(addr)
+		srv := server.NewHTTPServer(addr)
 		return srv.Start()
 	},
 }
