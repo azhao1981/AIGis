@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/bytedance/sonic"
+	"github.com/bytedance/sonic/ast"
 
 	"aigis/internal/core"
 )
@@ -39,24 +39,42 @@ func (p *PIIGuard) Priority() int {
 	return 100
 }
 
-// OnRequest processes the request to redact PII using gjson/sjson
+// OnRequest processes the request to redact PII using Sonic AST
 func (p *PIIGuard) OnRequest(ctx *core.AIGisContext, body []byte) ([]byte, error) {
-	messages := gjson.GetBytes(body, "messages")
-	if !messages.Exists() || !messages.IsArray() {
+	root, err := sonic.Get(body)
+	if err != nil {
+		return body, nil
+	}
+
+	messagesNode := root.Get("messages")
+	if err := messagesNode.Check(); err != nil {
+		return body, nil
+	}
+
+	length, err := messagesNode.Len()
+	if err != nil || length == 0 {
 		return body, nil
 	}
 
 	modified := false
-	result := body
 
-	// Iterate through messages
-	for i, msg := range messages.Array() {
-		content := msg.Get("content")
-		if !content.Exists() || content.Type != gjson.String {
+	for i := 0; i < length; i++ {
+		msgNode := messagesNode.Index(i)
+		contentNode := msgNode.Get("content")
+
+		if err := contentNode.Check(); err != nil {
 			continue
 		}
 
-		contentStr := content.String()
+		if contentNode.Type() != ast.V_STRING {
+			continue
+		}
+
+		contentStr, err := contentNode.String()
+		if err != nil {
+			continue
+		}
+
 		newContent := contentStr
 
 		// Redact emails
@@ -71,18 +89,18 @@ func (p *PIIGuard) OnRequest(ctx *core.AIGisContext, body []byte) ([]byte, error
 
 		// Only update if content changed
 		if newContent != contentStr {
-			path := fmt.Sprintf("messages.%d.content", i)
-			var err error
-			result, err = sjson.SetBytes(result, path, newContent)
-			if err != nil {
-				return body, fmt.Errorf("failed to set content at %s: %w", path, err)
-			}
+			msgNode.Set("content", ast.NewString(newContent))
 			modified = true
 		}
 	}
 
 	if modified {
-		fmt.Println("🔒 PII Detected and Redacted")
+		fmt.Println("PII Detected and Redacted")
+	}
+
+	result, err := root.MarshalJSON()
+	if err != nil {
+		return body, fmt.Errorf("failed to marshal JSON: %w", err)
 	}
 
 	return result, nil

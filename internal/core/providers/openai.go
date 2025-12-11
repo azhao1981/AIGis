@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tidwall/gjson"
+	"github.com/bytedance/sonic"
 )
 
 // OpenAIProvider implements the core.Provider interface for OpenAI API
@@ -37,13 +37,9 @@ func (p *OpenAIProvider) ID() string {
 
 // Send sends a raw request body to OpenAI and returns the raw response body
 func (p *OpenAIProvider) Send(ctx context.Context, body []byte) ([]byte, error) {
-	model := gjson.GetBytes(body, "model").String()
-	msgCount := gjson.GetBytes(body, "messages.#").Int()
-	log.Printf("[OpenAI] Send called, model: %s, messages: %d", model, msgCount)
-
 	// Create HTTP request
 	url := p.baseURL + "/chat/completions"
-	log.Printf("[OpenAI] Sending to: %s", url)
+	log.Printf("[OpenAI] Sending to: %s %s", url, string(body))
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -85,7 +81,11 @@ func (p *OpenAIProvider) Stream(ctx context.Context, body []byte) (<-chan []byte
 
 // handleHTTPError handles HTTP error responses from OpenAI
 func (p *OpenAIProvider) handleHTTPError(statusCode int, body []byte) error {
-	errMsg := gjson.GetBytes(body, "error.message").String()
+	root, err := sonic.Get(body)
+	var errMsg string
+	if err == nil {
+		errMsg, _ = root.Get("error").Get("message").String()
+	}
 	if errMsg == "" {
 		return fmt.Errorf("HTTP %d: %s", statusCode, string(body))
 	}
