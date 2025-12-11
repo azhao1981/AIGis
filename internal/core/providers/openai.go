@@ -48,7 +48,7 @@ func (p *OpenAIProvider) Send(ctx context.Context, req *core.ModelRequest) (inte
 
 	// Create HTTP request
 	url := p.baseURL + "/chat/completions"
-	log.Printf("[OpenAI] Sending to: %s", url)
+	log.Printf("[OpenAI] Sending to: %s %s", url, string(reqBody))
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
