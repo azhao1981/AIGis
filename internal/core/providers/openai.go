@@ -3,14 +3,13 @@ package providers
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"time"
 
-	"aigis/internal/core"
+	"github.com/tidwall/gjson"
 )
 
 // OpenAIProvider implements the core.Provider interface for OpenAI API
@@ -36,21 +35,17 @@ func (p *OpenAIProvider) ID() string {
 	return "openai"
 }
 
-// Send sends a non-streaming request to OpenAI and returns the response
-func (p *OpenAIProvider) Send(ctx context.Context, req *core.ModelRequest) (interface{}, error) {
-	log.Printf("[OpenAI] Send called, model: %s, messages: %d", req.Model, len(req.Messages))
-
-	// Marshal request to JSON
-	reqBody, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
+// Send sends a raw request body to OpenAI and returns the raw response body
+func (p *OpenAIProvider) Send(ctx context.Context, body []byte) ([]byte, error) {
+	model := gjson.GetBytes(body, "model").String()
+	msgCount := gjson.GetBytes(body, "messages.#").Int()
+	log.Printf("[OpenAI] Send called, model: %s, messages: %d", model, msgCount)
 
 	// Create HTTP request
 	url := p.baseURL + "/chat/completions"
-	log.Printf("[OpenAI] Sending to: %s %s", url, string(reqBody))
+	log.Printf("[OpenAI] Sending to: %s", url)
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -68,54 +63,41 @@ func (p *OpenAIProvider) Send(ctx context.Context, req *core.ModelRequest) (inte
 	defer resp.Body.Close()
 
 	// Read response body
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	log.Printf("[OpenAI] Response status: %d, body length: %d", resp.StatusCode, len(body))
+	log.Printf("[OpenAI] Response status: %d, body length: %d", resp.StatusCode, len(respBody))
 
 	// Handle HTTP errors
 	if resp.StatusCode != http.StatusOK {
-		return nil, p.handleHTTPError(resp.StatusCode, body)
+		return nil, p.handleHTTPError(resp.StatusCode, respBody)
 	}
 
-	// Unmarshal response
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return result, nil
+	return respBody, nil
 }
 
 // Stream sends a streaming request to OpenAI (not implemented yet)
-func (p *OpenAIProvider) Stream(ctx context.Context, req *core.ModelRequest) (<-chan string, error) {
+func (p *OpenAIProvider) Stream(ctx context.Context, body []byte) (<-chan []byte, error) {
 	return nil, fmt.Errorf("streaming not implemented")
 }
 
 // handleHTTPError handles HTTP error responses from OpenAI
 func (p *OpenAIProvider) handleHTTPError(statusCode int, body []byte) error {
-	var errResp struct {
-		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-		} `json:"error"`
-	}
-
-	if err := json.Unmarshal(body, &errResp); err != nil {
+	errMsg := gjson.GetBytes(body, "error.message").String()
+	if errMsg == "" {
 		return fmt.Errorf("HTTP %d: %s", statusCode, string(body))
 	}
 
 	switch statusCode {
 	case http.StatusUnauthorized:
-		return fmt.Errorf("unauthorized: %s", errResp.Error.Message)
+		return fmt.Errorf("unauthorized: %s", errMsg)
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("rate limit exceeded: %s", errResp.Error.Message)
+		return fmt.Errorf("rate limit exceeded: %s", errMsg)
 	case http.StatusBadRequest:
-		return fmt.Errorf("bad request: %s", errResp.Error.Message)
+		return fmt.Errorf("bad request: %s", errMsg)
 	default:
-		return fmt.Errorf("HTTP %d: %s", statusCode, errResp.Error.Message)
+		return fmt.Errorf("HTTP %d: %s", statusCode, errMsg)
 	}
 }

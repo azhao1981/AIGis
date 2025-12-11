@@ -22,7 +22,7 @@ func (p *Pipeline) AddProcessor(processor Processor) {
 }
 
 // ExecuteRequest executes all processors' OnRequest methods in priority order
-func (p *Pipeline) ExecuteRequest(ctx *AIGisContext, req *ModelRequest) error {
+func (p *Pipeline) ExecuteRequest(ctx *AIGisContext, body []byte) ([]byte, error) {
 	// Create a copy of processors to avoid modifying the original slice
 	sortedProcessors := make([]Processor, len(p.processors))
 	copy(sortedProcessors, p.processors)
@@ -33,17 +33,20 @@ func (p *Pipeline) ExecuteRequest(ctx *AIGisContext, req *ModelRequest) error {
 	})
 
 	// Execute each processor's OnRequest method
+	result := body
 	for _, processor := range sortedProcessors {
-		if err := processor.OnRequest(ctx, req); err != nil {
-			return err
+		var err error
+		result, err = processor.OnRequest(ctx, result)
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	return nil
+	return result, nil
 }
 
 // ExecuteResponse executes all processors' OnResponse methods in priority order
-func (p *Pipeline) ExecuteResponse(ctx *AIGisContext, resp interface{}) error {
+func (p *Pipeline) ExecuteResponse(ctx *AIGisContext, body []byte) ([]byte, error) {
 	// Create a copy of processors to avoid modifying the original slice
 	sortedProcessors := make([]Processor, len(p.processors))
 	copy(sortedProcessors, p.processors)
@@ -54,11 +57,14 @@ func (p *Pipeline) ExecuteResponse(ctx *AIGisContext, resp interface{}) error {
 	})
 
 	// Execute each processor's OnResponse method
+	result := body
 	for _, processor := range sortedProcessors {
-		if err := processor.OnResponse(ctx, resp); err != nil {
-			return err
+		var err error
+		result, err = processor.OnResponse(ctx, result)
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	return nil
+	return result, nil
 }

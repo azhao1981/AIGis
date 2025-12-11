@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
+
 	"aigis/internal/core"
 )
 
@@ -36,59 +39,56 @@ func (p *PIIGuard) Priority() int {
 	return 100
 }
 
-// OnRequest processes the request to redact PII
-func (p *PIIGuard) OnRequest(ctx *core.AIGisContext, req *core.ModelRequest) error {
+// OnRequest processes the request to redact PII using gjson/sjson
+func (p *PIIGuard) OnRequest(ctx *core.AIGisContext, body []byte) ([]byte, error) {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, nil
+	}
+
+	modified := false
+	result := body
+
 	// Iterate through messages
-	for i, msg := range req.Messages {
-		// Type assert to map[string]interface{}
-		msgMap, ok := msg.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("message at index %d is not a valid format", i)
+	for i, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.Exists() || content.Type != gjson.String {
+			continue
 		}
 
-		// Get content field
-		content, exists := msgMap["content"]
-		if !exists {
-			continue // Skip if no content field
-		}
-
-		// Type assert content to string
-		contentStr, ok := content.(string)
-		if !ok {
-			continue // Skip if content is not a string
-		}
-
-		// Track if any PII was detected
-		hasPII := false
+		contentStr := content.String()
+		newContent := contentStr
 
 		// Redact emails
-		if p.emailRegex.MatchString(contentStr) {
-			contentStr = p.emailRegex.ReplaceAllString(contentStr, "[EMAIL_REDACTED]")
-			hasPII = true
+		if p.emailRegex.MatchString(newContent) {
+			newContent = p.emailRegex.ReplaceAllString(newContent, "[EMAIL_REDACTED]")
 		}
 
 		// Redact phone numbers
-		if p.phoneRegex.MatchString(contentStr) {
-			contentStr = p.phoneRegex.ReplaceAllString(contentStr, "[PHONE_REDACTED]")
-			hasPII = true
+		if p.phoneRegex.MatchString(newContent) {
+			newContent = p.phoneRegex.ReplaceAllString(newContent, "[PHONE_REDACTED]")
 		}
 
-		// Update the message content if PII was found
-		if hasPII {
-			msgMap["content"] = contentStr
-			req.Messages[i] = msgMap
-
-			// Log the detection (using a simple approach for now)
-			fmt.Println("🔒 PII Detected and Redacted")
+		// Only update if content changed
+		if newContent != contentStr {
+			path := fmt.Sprintf("messages.%d.content", i)
+			var err error
+			result, err = sjson.SetBytes(result, path, newContent)
+			if err != nil {
+				return body, fmt.Errorf("failed to set content at %s: %w", path, err)
+			}
+			modified = true
 		}
 	}
 
-	return nil
+	if modified {
+		fmt.Println("🔒 PII Detected and Redacted")
+	}
+
+	return result, nil
 }
 
-// OnResponse is called after the response is received (empty for now)
-func (p *PIIGuard) OnResponse(ctx *core.AIGisContext, resp interface{}) error {
-	// For now, we don't process responses for PII
-	// In the future, we might want to sanitize model responses as well
-	return nil
+// OnResponse handles the raw response body (passthrough for now)
+func (p *PIIGuard) OnResponse(ctx *core.AIGisContext, body []byte) ([]byte, error) {
+	return body, nil
 }

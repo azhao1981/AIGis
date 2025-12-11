@@ -6,8 +6,9 @@ type Processor interface {
 	Name() string
 	// Priority returns the execution priority (lower = earlier)
 	Priority() int
-	// OnRequest is called before the request is sent to the provider
-	OnRequest(ctx *AIGisContext, req *ModelRequest) error
-	// OnResponse is called after the response is received from the provider
-	OnResponse(ctx *AIGisContext, resp interface{}) error
+	// OnRequest receives the raw body, modifies it (if needed), and returns the new body.
+	// If no change is needed, it can return the original body.
+	OnRequest(ctx *AIGisContext, body []byte) ([]byte, error)
+	// OnResponse handles the raw response body.
+	OnResponse(ctx *AIGisContext, body []byte) ([]byte, error)
 }

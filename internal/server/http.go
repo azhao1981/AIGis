@@ -2,8 +2,8 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -113,40 +113,41 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 	// Set content type
 	w.Header().Set("Content-Type", "application/json")
 
-	// Parse the incoming JSON into ModelRequest
-	var req core.ModelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+	// Read the raw body into []byte
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read body: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("[Gateway] Parsed request, model: %s, messages: %d", req.Model, len(req.Messages))
+	log.Printf("[Gateway] Received body length: %d", len(body))
 
 	// Create a GatewayContext
 	ctx := core.NewGatewayContext(r.Context())
 	ctx.RequestID = generateRequestID()
 
 	// Execute the pipeline for request processing (PII redaction)
-	if err := s.pipeline.ExecuteRequest(ctx, &req); err != nil {
+	processedBody, err := s.pipeline.ExecuteRequest(ctx, body)
+	if err != nil {
 		http.Error(w, fmt.Sprintf("Pipeline error: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	log.Printf("[Gateway] Pipeline executed, calling provider")
 
-	// Forward the cleaned request to OpenAI
-	resp, err := s.provider.Send(ctx, &req)
+	// Forward the processed request to OpenAI
+	resp, err := s.provider.Send(r.Context(), processedBody)
 	if err != nil {
 		log.Printf("[Gateway] Provider error: %v", err)
 		http.Error(w, fmt.Sprintf("Provider error: %v", err), http.StatusBadGateway)
 		return
 	}
 
-	log.Printf("[Gateway] Provider returned, encoding response")
+	log.Printf("[Gateway] Provider returned, response length: %d", len(resp))
 
-	// Return the real response from OpenAI
+	// Return the raw response from OpenAI
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(resp)
+	w.Write(resp)
 }
 
 // generateRequestID generates a simple request ID for tracking

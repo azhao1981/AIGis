@@ -2,19 +2,12 @@ package core
 
 import "context"
 
-// ModelRequest represents a request to an LLM provider
-type ModelRequest struct {
-	Model    string        `json:"model"`
-	Messages []interface{} `json:"messages"`
-	Stream   bool          `json:"stream"`
-}
-
 // Provider is the LLM adapter interface
 type Provider interface {
 	// ID returns the unique identifier for this provider
 	ID() string
-	// Send sends a request and returns the response
-	Send(ctx context.Context, req *ModelRequest) (interface{}, error)
+	// Send sends a raw request body and returns the raw response body
+	Send(ctx context.Context, body []byte) ([]byte, error)
 	// Stream sends a request and returns a channel for streaming chunks
-	Stream(ctx context.Context, req *ModelRequest) (<-chan string, error)
+	Stream(ctx context.Context, body []byte) (<-chan []byte, error)
 }
