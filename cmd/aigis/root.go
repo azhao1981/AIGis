@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -31,6 +32,9 @@ func SetupRootCmd() {
 }
 
 func initConfig() {
+	// Load .env file (ignore if not exists)
+	_ = godotenv.Load()
+
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
 	} else {

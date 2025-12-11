@@ -102,6 +102,8 @@ func (s *HTTPServer) Start() error {
 
 // handleChatCompletions processes LLM requests through the pipeline
 func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[Gateway] Received request: %s %s", r.Method, r.URL.Path)
+
 	// Only accept POST requests
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -118,6 +120,8 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	log.Printf("[Gateway] Parsed request, model: %s, messages: %d", req.Model, len(req.Messages))
+
 	// Create a GatewayContext
 	ctx := core.NewGatewayContext(r.Context())
 	ctx.RequestID = generateRequestID()
@@ -128,12 +132,17 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	log.Printf("[Gateway] Pipeline executed, calling provider")
+
 	// Forward the cleaned request to OpenAI
 	resp, err := s.provider.Send(ctx, &req)
 	if err != nil {
+		log.Printf("[Gateway] Provider error: %v", err)
 		http.Error(w, fmt.Sprintf("Provider error: %v", err), http.StatusBadGateway)
 		return
 	}
+
+	log.Printf("[Gateway] Provider returned, encoding response")
 
 	// Return the real response from OpenAI
 	w.WriteHeader(http.StatusOK)

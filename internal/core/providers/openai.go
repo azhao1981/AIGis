@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -37,6 +38,8 @@ func (p *OpenAIProvider) ID() string {
 
 // Send sends a non-streaming request to OpenAI and returns the response
 func (p *OpenAIProvider) Send(ctx context.Context, req *core.ModelRequest) (interface{}, error) {
+	log.Printf("[OpenAI] Send called, model: %s, messages: %d", req.Model, len(req.Messages))
+
 	// Marshal request to JSON
 	reqBody, err := json.Marshal(req)
 	if err != nil {
@@ -45,6 +48,8 @@ func (p *OpenAIProvider) Send(ctx context.Context, req *core.ModelRequest) (inte
 
 	// Create HTTP request
 	url := p.baseURL + "/chat/completions"
+	log.Printf("[OpenAI] Sending to: %s", url)
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -57,6 +62,7 @@ func (p *OpenAIProvider) Send(ctx context.Context, req *core.ModelRequest) (inte
 	// Execute request
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
+		log.Printf("[OpenAI] Request failed: %v", err)
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -66,6 +72,8 @@ func (p *OpenAIProvider) Send(ctx context.Context, req *core.ModelRequest) (inte
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
+
+	log.Printf("[OpenAI] Response status: %d, body length: %d", resp.StatusCode, len(body))
 
 	// Handle HTTP errors
 	if resp.StatusCode != http.StatusOK {
