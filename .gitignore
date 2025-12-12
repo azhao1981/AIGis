@@ -3,6 +3,7 @@
 log
 logs
 .gz
+.vscode
 .claude
 CLAUDE.md
 bin

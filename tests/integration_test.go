@@ -95,7 +95,7 @@ func TestChatCompletions(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"model": "gpt-4o-mini",
 		"messages": []map[string]string{
-			{"role": "user", "content": "Say hi"},
+			{"role": "user", "content": "这里是脱敏测试，ECHO后面的信息: <message>My email is dangerous@coder.com and my phone is 13800138000.</message>"},
 		},
 	})
 
@@ -109,5 +109,26 @@ func TestChatCompletions(t *testing.T) {
 		buf := new(bytes.Buffer)
 		buf.ReadFrom(resp.Body)
 		t.Fatalf("期望状态 200，得到 %d: %s", resp.StatusCode, buf.String())
+	}
+
+	// Read and log the response
+	var response map[string]interface{}
+	err = json.NewDecoder(resp.Body).Decode(&response)
+	if err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+
+	// Log the full response for debugging
+	t.Logf("Response: %+v", response)
+
+	// Check if the response has choices
+	if choices, ok := response["choices"].([]interface{}); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]interface{}); ok {
+			if message, ok := choice["message"].(map[string]interface{}); ok {
+				if content, ok := message["content"].(string); ok {
+					t.Logf("Response content: %s", content)
+				}
+			}
+		}
 	}
 }
