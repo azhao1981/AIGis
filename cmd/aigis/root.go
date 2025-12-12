@@ -3,11 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 
-	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
+
+	"aigis/internal/config"
 )
 
 var cfgFile string
@@ -26,33 +25,9 @@ func Execute() {
 }
 
 func SetupRootCmd() {
-	cobra.OnInitialize(initConfig)
+	cobra.OnInitialize(func() {
+		config.Init(cfgFile)
+	})
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./configs/config.yaml)")
-}
-
-func initConfig() {
-	// Load .env file (ignore if not exists)
-	_ = godotenv.Load()
-
-	if cfgFile != "" {
-		viper.SetConfigFile(cfgFile)
-	} else {
-		viper.SetConfigName("config")
-		viper.SetConfigType("yaml")
-		viper.AddConfigPath("./configs")
-		viper.AddConfigPath(".")
-	}
-
-	// Environment variables
-	viper.SetEnvPrefix("AIGIS")
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	viper.AutomaticEnv()
-
-	// Read config file
-	if err := viper.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			fmt.Fprintf(os.Stderr, "Error reading config file: %v\n", err)
-		}
-	}
 }

@@ -23,6 +23,7 @@ type HTTPServer struct {
 	*Server
 	pipeline *core.Pipeline
 	provider core.Provider
+	mux      *http.ServeMux
 }
 
 // NewHTTPServer creates a new HTTP server with gateway capabilities
@@ -44,15 +45,20 @@ func NewHTTPServer(addr string) *HTTPServer {
 
 	provider := providers.NewOpenAIProvider(apiKey, baseURL)
 
-	return &HTTPServer{
+	s := &HTTPServer{
 		Server:   baseServer,
 		pipeline: pipeline,
 		provider: provider,
 	}
+
+	// Initialize mux
+	s.mux = s.setupRoutes()
+
+	return s
 }
 
-// Start starts the HTTP server with gateway endpoints
-func (s *HTTPServer) Start() error {
+// setupRoutes creates and configures the HTTP routes
+func (s *HTTPServer) setupRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Health check endpoint
@@ -62,9 +68,7 @@ func (s *HTTPServer) Start() error {
 	})
 
 	// Gateway endpoint for LLM requests
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		s.handleChatCompletions(w, r)
-	})
+	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 
 	// Root endpoint
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -72,9 +76,19 @@ func (s *HTTPServer) Start() error {
 		w.Write([]byte(`{"message":"AIGis is running"}`))
 	})
 
+	return mux
+}
+
+// Handler returns the HTTP handler for testing
+func (s *HTTPServer) Handler() http.Handler {
+	return s.mux
+}
+
+// Start starts the HTTP server with gateway endpoints
+func (s *HTTPServer) Start() error {
 	s.server = &http.Server{
 		Addr:         s.addr,
-		Handler:      mux,
+		Handler:      s.mux,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
