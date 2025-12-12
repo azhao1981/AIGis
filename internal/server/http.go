@@ -4,14 +4,15 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 
 	"aigis/internal/core"
 	"aigis/internal/core/processors"
@@ -24,14 +25,18 @@ type HTTPServer struct {
 	pipeline *core.Pipeline
 	provider core.Provider
 	mux      *http.ServeMux
+	logger   *zap.Logger
 }
 
 // NewHTTPServer creates a new HTTP server with gateway capabilities
-func NewHTTPServer(addr string) *HTTPServer {
+func NewHTTPServer(addr string, logger *zap.Logger) *HTTPServer {
 	baseServer := New(addr)
 
 	// Initialize pipeline
 	pipeline := core.NewPipeline()
+
+	// Register RequestLogger processor first
+	pipeline.AddProcessor(processors.NewRequestLogger())
 
 	// Register PII Guard processor
 	pipeline.AddProcessor(processors.NewPIIGuard())
@@ -49,6 +54,7 @@ func NewHTTPServer(addr string) *HTTPServer {
 		Server:   baseServer,
 		pipeline: pipeline,
 		provider: provider,
+		logger:   logger,
 	}
 
 	// Initialize mux
@@ -99,14 +105,14 @@ func (s *HTTPServer) Start() error {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Starting AIGis on %s", s.addr)
+		s.logger.Info("Starting AIGis", zap.String("addr", s.addr))
 		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server error: %v", err)
+			s.logger.Fatal("Server error", zap.Error(err))
 		}
 	}()
 
 	<-stop
-	fmt.Println("\nShutting down server...")
+	s.logger.Info("Shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -116,8 +122,6 @@ func (s *HTTPServer) Start() error {
 
 // handleChatCompletions processes LLM requests through the pipeline
 func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[Gateway] Received request: %s %s", r.Method, r.URL.Path)
-
 	// Only accept POST requests
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -130,38 +134,53 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 	// Read the raw body into []byte
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		s.logger.Error("Failed to read body", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to read body: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("[Gateway] Received body length: %d", len(body))
+	// Generate request and trace IDs
+	requestID := generateRequestID()
+	traceID := uuid.New().String()
+
+	// Create a logger with request context
+	reqLogger := s.logger.With(
+		zap.String("request_id", requestID),
+		zap.String("trace_id", traceID),
+	)
 
 	// Create a GatewayContext
-	ctx := core.NewGatewayContext(r.Context())
-	ctx.RequestID = generateRequestID()
+	ctx := core.NewGatewayContext(r.Context(), reqLogger)
+	ctx.RequestID = requestID
+	ctx.TraceID = traceID
 
 	// Execute the pipeline for request processing (PII redaction)
 	processedBody, err := s.pipeline.ExecuteRequest(ctx, body)
 	if err != nil {
+		reqLogger.Error("Pipeline error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Pipeline error: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("[Gateway] Pipeline executed, calling provider")
-
 	// Forward the processed request to OpenAI
 	resp, err := s.provider.Send(r.Context(), processedBody)
 	if err != nil {
-		log.Printf("[Gateway] Provider error: %v", err)
+		reqLogger.Error("Provider error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Provider error: %v", err), http.StatusBadGateway)
 		return
 	}
 
-	log.Printf("[Gateway] Provider returned, response length: %d", len(resp))
+	// Execute the pipeline for response processing
+	finalResp, err := s.pipeline.ExecuteResponse(ctx, resp)
+	if err != nil {
+		reqLogger.Error("Response pipeline error", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Response pipeline error: %v", err), http.StatusInternalServerError)
+		return
+	}
 
-	// Return the raw response from OpenAI
+	// Return the processed response
 	w.WriteHeader(http.StatusOK)
-	w.Write(resp)
+	w.Write(finalResp)
 }
 
 // generateRequestID generates a simple request ID for tracking

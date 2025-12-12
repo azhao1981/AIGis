@@ -3,6 +3,9 @@ package core
 import (
 	"context"
 	"sync"
+	"time"
+
+	"go.uber.org/zap"
 )
 
 // AIGisContext extends standard context with gateway-specific fields
@@ -11,16 +14,20 @@ type AIGisContext struct {
 	RequestID string
 	UserID    string
 	TraceID   string
+	StartTime time.Time
+	Log       *zap.Logger
 
 	mu       sync.RWMutex
 	metadata map[string]interface{}
 }
 
 // NewGatewayContext creates a new GatewayContext
-func NewGatewayContext(ctx context.Context) *AIGisContext {
+func NewGatewayContext(ctx context.Context, logger *zap.Logger) *AIGisContext {
 	return &AIGisContext{
-		Context:  ctx,
-		metadata: make(map[string]interface{}),
+		Context:   ctx,
+		StartTime: time.Now(),
+		Log:       logger,
+		metadata:  make(map[string]interface{}),
 	}
 }
 

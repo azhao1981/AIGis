@@ -105,7 +105,7 @@ func (p *PIIGuard) OnRequest(ctx *core.AIGisContext, body []byte) ([]byte, error
 	}
 
 	if modified {
-		fmt.Println("PII Detected and Redacted")
+		ctx.Log.Info("PII Detected and Redacted")
 	}
 
 	result, err := root.MarshalJSON()

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"time"
 
@@ -39,7 +38,6 @@ func (p *OpenAIProvider) ID() string {
 func (p *OpenAIProvider) Send(ctx context.Context, body []byte) ([]byte, error) {
 	// Create HTTP request
 	url := p.baseURL + "/chat/completions"
-	log.Printf("[OpenAI] Sending to: %s %s", url, string(body))
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -53,7 +51,6 @@ func (p *OpenAIProvider) Send(ctx context.Context, body []byte) ([]byte, error) 
 	// Execute request
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		log.Printf("[OpenAI] Request failed: %v", err)
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -63,8 +60,6 @@ func (p *OpenAIProvider) Send(ctx context.Context, body []byte) ([]byte, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
-
-	log.Printf("[OpenAI] Response status: %d, body length: %d", resp.StatusCode, len(respBody))
 
 	// Handle HTTP errors
 	if resp.StatusCode != http.StatusOK {
