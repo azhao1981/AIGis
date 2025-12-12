@@ -8,7 +8,7 @@
       }
     ]
   }
-
+go test -v ./tests/...
 问题2：2 日志最佳实践
 问题3：3 做成配置 from to ak message 得到一个 url
 问题4：4 替换器优化，增加 方法规则 到这里MVP 完成

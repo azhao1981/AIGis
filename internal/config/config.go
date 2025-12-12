@@ -3,16 +3,52 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 )
 
+// findEnvFile 向上递归查找 .env 文件
+func findEnvFile() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	for {
+		envFile := filepath.Join(dir, ".env")
+		if _, err := os.Stat(envFile); err == nil {
+			return envFile
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// 已到达根目录
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
 // Init 初始化配置，加载 .env 和 config.yaml
 func Init(cfgFile string) {
-	// Load .env file (ignore if not exists)
-	_ = godotenv.Load()
+	// Try to load .env file from current directory and search upwards
+	if err := godotenv.Load(); err != nil {
+		if envFile := findEnvFile(); envFile != "" {
+			if err := godotenv.Load(envFile); err == nil {
+				fmt.Fprintf(os.Stderr, "Loaded .env file from: %s\n", envFile)
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: error loading .env file from %s: %v\n", envFile, err)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: .env file not found in current or parent directories\n")
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Loaded .env file from current directory\n")
+	}
 
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)

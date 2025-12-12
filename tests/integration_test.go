@@ -14,6 +14,13 @@ import (
 	"aigis/internal/server"
 )
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func TestMain(m *testing.M) {
 	config.Init("")
 	os.Exit(m.Run())
@@ -73,9 +80,14 @@ func TestChatCompletionsMethodNotAllowed(t *testing.T) {
 }
 
 func TestChatCompletions(t *testing.T) {
-	if viper.GetString("openai.api_key") == "" {
+	apiKey := viper.GetString("openai.api_key")
+	if apiKey == "" {
+		// Debug: 打印所有 openai 相关配置
+		t.Logf("openai.api_key: '%s'", viper.GetString("openai.api_key"))
+		t.Logf("openai.base_url: '%s'", viper.GetString("openai.base_url"))
 		t.Skip("跳过: 未设置 OPENAI_API_KEY")
 	}
+	t.Logf("Using API key: %s...", apiKey[:min(10, len(apiKey))])
 
 	ts := newTestServer()
 	defer ts.Close()

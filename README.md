@@ -41,3 +41,9 @@
   ├── go.mod
   └── go.sum
 ```
+
+## test
+
+```bash
+go test -v ./tests/...
+```
