@@ -17,6 +17,7 @@ import (
 	"aigis/internal/core"
 	"aigis/internal/core/processors"
 	"aigis/internal/core/providers"
+	"aigis/internal/pkg/logger"
 )
 
 // HTTPServer extends the basic server with gateway functionality
@@ -25,12 +26,15 @@ type HTTPServer struct {
 	pipeline *core.Pipeline
 	provider core.Provider
 	mux      *http.ServeMux
-	logger   *zap.Logger
+	logger   *logger.Logger
 }
 
 // NewHTTPServer creates a new HTTP server with gateway capabilities
-func NewHTTPServer(addr string, logger *zap.Logger) *HTTPServer {
+func NewHTTPServer(addr string, zapLogger *zap.Logger) *HTTPServer {
 	baseServer := New(addr)
+
+	// Wrap zap logger with our extension
+	extLogger := logger.NewLogger(zapLogger)
 
 	// Initialize pipeline
 	pipeline := core.NewPipeline()
@@ -54,7 +58,7 @@ func NewHTTPServer(addr string, logger *zap.Logger) *HTTPServer {
 		Server:   baseServer,
 		pipeline: pipeline,
 		provider: provider,
-		logger:   logger,
+		logger:   extLogger,
 	}
 
 	// Initialize mux
@@ -105,6 +109,7 @@ func (s *HTTPServer) Start() error {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
+		// Skip 0 层，显示这个 goroutine 的实际调用位置（Start 方法）
 		s.logger.Info("Starting AIGis", zap.String("addr", s.addr))
 		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			s.logger.Fatal("Server error", zap.Error(err))
@@ -112,7 +117,8 @@ func (s *HTTPServer) Start() error {
 	}()
 
 	<-stop
-	s.logger.Info("Shutting down server...")
+	// Skip 0 层，因为包装器会自动 Skip 1
+	s.logger.Skip(0).Info("Shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -134,6 +140,7 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 	// Read the raw body into []byte
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		// 不需要额外 Skip，因为包装器已经 Skip 了 1 层
 		s.logger.Error("Failed to read body", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to read body: %v", err), http.StatusBadRequest)
 		return
@@ -149,14 +156,15 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 		zap.String("trace_id", traceID),
 	)
 
-	// Create a GatewayContext
-	ctx := core.NewGatewayContext(r.Context(), reqLogger)
+	// Create a GatewayContext - 需要获取底层的 zap.Logger
+	ctx := core.NewGatewayContext(r.Context(), reqLogger.Logger)
 	ctx.RequestID = requestID
 	ctx.TraceID = traceID
 
 	// Execute the pipeline for request processing (PII redaction)
 	processedBody, err := s.pipeline.ExecuteRequest(ctx, body)
 	if err != nil {
+		// 不需要额外 Skip，因为包装器已经 Skip 了 1 层
 		reqLogger.Error("Pipeline error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Pipeline error: %v", err), http.StatusInternalServerError)
 		return
@@ -165,6 +173,7 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 	// Forward the processed request to OpenAI
 	resp, err := s.provider.Send(r.Context(), processedBody)
 	if err != nil {
+		// 不需要额外 Skip，因为包装器已经 Skip 了 1 层
 		reqLogger.Error("Provider error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Provider error: %v", err), http.StatusBadGateway)
 		return
@@ -173,6 +182,7 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 	// Execute the pipeline for response processing
 	finalResp, err := s.pipeline.ExecuteResponse(ctx, resp)
 	if err != nil {
+		// 不需要额外 Skip，因为包装器已经 Skip 了 1 层
 		reqLogger.Error("Response pipeline error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Response pipeline error: %v", err), http.StatusInternalServerError)
 		return
