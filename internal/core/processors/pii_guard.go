@@ -20,8 +20,9 @@ type PIIGuard struct {
 func NewPIIGuard() *PIIGuard {
 	// Simple email pattern for MVP
 	emailPattern := `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`
-	// Simple mobile phone pattern (international formats) for MVP
-	phonePattern := `(\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})`
+	// Mobile phone pattern supporting various international formats including Chinese mobile numbers
+	// Matches: 13800138000, +86 13800138000, (123) 456-7890, 123-456-7890, etc.
+	phonePattern := `(\+?\d{1,3}[-.\s]?)?(\(?\d{3,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{4}`
 
 	return &PIIGuard{
 		emailRegex: regexp.MustCompile(emailPattern),
@@ -51,27 +52,34 @@ func (p *PIIGuard) OnRequest(ctx *core.AIGisContext, body []byte) ([]byte, error
 		return body, nil
 	}
 
-	length, err := messagesNode.Len()
-	if err != nil || length == 0 {
+	// Check if it's an array
+	if messagesNode.Type() != ast.V_ARRAY {
 		return body, nil
 	}
 
 	modified := false
-
-	for i := 0; i < length; i++ {
+	i := 0
+	for {
 		msgNode := messagesNode.Index(i)
+		if err := msgNode.Check(); err != nil {
+			break
+		}
+
 		contentNode := msgNode.Get("content")
 
 		if err := contentNode.Check(); err != nil {
+			i++
 			continue
 		}
 
 		if contentNode.Type() != ast.V_STRING {
+			i++
 			continue
 		}
 
 		contentStr, err := contentNode.String()
 		if err != nil {
+			i++
 			continue
 		}
 
@@ -92,6 +100,8 @@ func (p *PIIGuard) OnRequest(ctx *core.AIGisContext, body []byte) ([]byte, error
 			msgNode.Set("content", ast.NewString(newContent))
 			modified = true
 		}
+
+		i++
 	}
 
 	if modified {

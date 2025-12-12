@@ -92,10 +92,14 @@ func TestChatCompletions(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()
 
+	// Test message with PII
+	testContent := "检查话里有没有敏感信息，没有或已经脱敏就原话返回： My email is dangerous@coder.com and my phone is 13800138000"
+	t.Logf("Testing PII redaction with content: %s", testContent)
+
 	body, _ := json.Marshal(map[string]any{
 		"model": "gpt-4o-mini",
 		"messages": []map[string]string{
-			{"role": "user", "content": "这里是脱敏测试，ECHO后面的信息: <message>My email is dangerous@coder.com and my phone is 13800138000.</message>"},
+			{"role": "user", "content": testContent},
 		},
 	})
 
