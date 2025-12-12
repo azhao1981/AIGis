@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"aigis/internal/core"
+
 	"go.uber.org/zap"
 )
 
@@ -40,8 +41,7 @@ func (r *RequestLogger) OnRequest(ctx *core.AIGisContext, body []byte) ([]byte, 
 	}
 	json.Unmarshal(body, &request)
 
-	// 记录请求开始 - 不需要重复添加 request_id 和 trace_id
-	// 因为它们已经在创建 reqLogger 时通过 With() 方法注入了
+	// 记录请求开始 - logger 会自动获取调用者信息
 	ctx.Log.Info("Request Started",
 		zap.String("method", "POST"),
 		zap.String("path", "/v1/chat/completions"),
@@ -57,10 +57,15 @@ func (r *RequestLogger) OnResponse(ctx *core.AIGisContext, body []byte) ([]byte,
 	// 计算延迟
 	latency := time.Since(ctx.StartTime)
 
-	// 记录请求完成 - 不需要重复添加 request_id 和 trace_id
-	// zap.Duration() 会自动格式化为带有单位的字符串
+	// 将延迟转换为毫秒，保留三位小数
+	// TODO：这里为什么在这里定义？这是瞎写的吗？
+	latencyMs := float64(latency.Nanoseconds()) / 1000000
+	// 四舍五入到三位小数
+	latencyMs = float64(int64(latencyMs*1000+0.5)) / 1000
+
+	// 记录请求完成 - logger 会自动获取调用者信息
 	ctx.Log.Info("Request Finished",
-		zap.Duration("latency", latency),
+		zap.Float64("latency_ms", latencyMs),
 		zap.String("status", "Success"),
 	)
 

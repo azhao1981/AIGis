@@ -1,7 +1,6 @@
 package logger
 
 import (
-	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -65,20 +64,17 @@ func TestLoggerCallerSkipIntegration(t *testing.T) {
 // TestCallerSkipDepth 测试不同的 caller skip 深度
 func TestCallerSkipDepth(t *testing.T) {
 	// 创建一个带 caller skip 的 logger
-	logger := zaptest.NewLogger(t, zaptest.Level(zap.InfoLevel), zap.AddCallerSkip(1))
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.InfoLevel))
 
 	// 测试当前文件的调用位置
 	func() {
-		logger.Info("Test with skip 1")
+		logger.Info("Test with skip 0")
 	}()
 
-	// 创建一个带更多跳过的 logger
-	logger2 := zaptest.NewLogger(t, zaptest.Level(zap.InfoLevel), zap.AddCallerSkip(2))
-
+	// 使用我们的 WithCallerSkip 函数
+	loggerWithSkip := WithCallerSkip(logger, 1)
 	func() {
-		func() {
-			logger2.Info("Test with skip 2")
-		}()
+		loggerWithSkip.Info("Test with skip 1")
 	}()
 
 	t.Log("Caller skip depth test passed")

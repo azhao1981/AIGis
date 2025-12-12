@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/viper"
 
 	"aigis/internal/config"
+	"aigis/internal/pkg/logger"
 	"aigis/internal/server"
 )
 
@@ -27,7 +28,8 @@ func TestMain(m *testing.M) {
 }
 
 func newTestServer() *httptest.Server {
-	srv := server.NewHTTPServer(":0")
+	log, _ := logger.New("info")
+	srv := server.NewHTTPServer(":0", log)
 	return httptest.NewServer(srv.Handler())
 }
 

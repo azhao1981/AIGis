@@ -2,6 +2,8 @@ package logger
 
 import (
 	"fmt"
+	"runtime"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -43,11 +45,18 @@ func NewWithCallerSkip(level string, skip int) (*zap.Logger, error) {
 	config.EncoderConfig.TimeKey = "timestamp"
 	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 
+	// 自定义 caller 编码格式，显示相对路径和行号
+	config.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
+
 	// 保持 caller 信息启用
 	config.DisableCaller = false
 
 	// 创建 logger
-	logger, err := config.Build()
+	logger, err := config.Build(
+		zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+			return &funcCore{Core: core}
+		}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create logger: %w", err)
 	}
@@ -67,4 +76,38 @@ func WithCallerSkip(logger *zap.Logger, skip int) *zap.Logger {
 		return logger
 	}
 	return logger.WithOptions(zap.AddCallerSkip(skip))
+}
+
+// funcCore 是一个自定义的 Core，自动添加函数名字段
+type funcCore struct {
+	zapcore.Core
+}
+
+func (c *funcCore) Check(entry zapcore.Entry, checked *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if c.Enabled(entry.Level) {
+		return checked.AddCore(entry, c)
+	}
+	return checked
+}
+
+func (c *funcCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
+	// 获取调用栈，需要跳过更多层到真实的业务代码
+	// 跳过层级：Write -> funcCore.Write -> zap.Logger.Info -> 业务代码
+	pc, _, _, ok := runtime.Caller(4)
+	if ok {
+		fn := runtime.FuncForPC(pc)
+		if fn != nil {
+			funcName := fn.Name()
+			// 添加函数名字段
+			fields = append(fields, zap.String("func", funcName))
+		}
+	}
+
+	// 调用原始的 Write
+	return c.Core.Write(entry, fields)
+}
+
+func (c *funcCore) With(fields []zapcore.Field) zapcore.Core {
+	clone := c.Core.With(fields)
+	return &funcCore{Core: clone}
 }
