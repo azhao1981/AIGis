@@ -1,11 +1,11 @@
 package processors
 
 import (
-	"encoding/json"
 	"time"
 
 	"aigis/internal/core"
 
+	"github.com/bytedance/sonic"
 	"go.uber.org/zap"
 )
 
@@ -35,17 +35,15 @@ func (r *RequestLogger) Priority() int {
 
 // OnRequest 处理请求
 func (r *RequestLogger) OnRequest(ctx *core.AIGisContext, body []byte) ([]byte, error) {
-	// 解析请求体以获取模型信息
-	var request struct {
-		Model string `json:"model"`
-	}
-	json.Unmarshal(body, &request)
+	// 从 JSON 中直接提取 model 字段
+	model, _ := sonic.Get(body, "model")
+	modelStr, _ := model.String()
 
 	// 记录请求开始 - logger 会自动获取调用者信息
 	ctx.Log.Info("Request Started",
 		zap.String("method", "POST"),
 		zap.String("path", "/v1/chat/completions"),
-		zap.String("model", request.Model),
+		zap.String("model", modelStr),
 	)
 
 	// 直接返回原始 body，不做修改
