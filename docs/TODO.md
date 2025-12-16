@@ -1,5 +1,10 @@
 
-问题3：3 配置化 from to ak message 得到一个 url
+问题3：3 转换引擎：我们要设计一个转换引擎，替换开发低效的 openai.go 硬编码替换，他的功能应该包括 
+1) 把同一个provider的消息做PII替换或是key转换，加header 等等
+2) 不同的 provider 转换，和PII替换，比如openai 转到 dify 
+3) 引擎配置可以放在数据库或是直接调用
+
+引擎配置大约如下：
   request
     from Setting: ak 
     to setting: ak base_url 
