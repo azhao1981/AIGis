@@ -8,6 +8,8 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
+
+	"aigis/internal/core/engine"
 )
 
 // findEnvFile 向上递归查找 .env 文件
@@ -70,4 +72,43 @@ func Init(cfgFile string) {
 			fmt.Fprintf(os.Stderr, "Error reading config file: %v\n", err)
 		}
 	}
+}
+
+// LoadEngineConfig loads and returns the engine configuration from viper
+func LoadEngineConfig() (*engine.EngineConfig, error) {
+	var config engine.EngineConfig
+
+	// Unmarshal the engine section
+	if err := viper.UnmarshalKey("engine", &config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal engine config: %w", err)
+	}
+
+	// If no routes configured, create a default OpenAI route for backward compatibility
+	if len(config.Routes) == 0 {
+		config.Routes = []engine.Route{
+			{
+				ID:      "default-openai",
+				Matcher: map[string]string{}, // Match all requests
+				Upstream: engine.Upstream{
+					BaseURL:      viper.GetString("openai.base_url"),
+					Path:         "/chat/completions",
+					AuthStrategy: engine.AuthStrategyBearer,
+					TokenEnv:     "OPENAI_API_KEY",
+				},
+				Transforms: []engine.TransformStep{
+					{
+						Type:   engine.TransformTypePII,
+						Config: map[string]string{},
+					},
+				},
+			},
+		}
+
+		// Use legacy openai config if available
+		if apiKey := viper.GetString("openai.api_key"); apiKey != "" {
+			os.Setenv("OPENAI_API_KEY", apiKey)
+		}
+	}
+
+	return &config, nil
 }

@@ -29,7 +29,10 @@ func TestMain(m *testing.M) {
 
 func newTestServer() *httptest.Server {
 	log, _ := logger.New("info")
-	srv := server.NewHTTPServer(":0", log)
+	srv, err := server.NewHTTPServer(":0", log)
+	if err != nil {
+		panic(err)
+	}
 	return httptest.NewServer(srv.Handler())
 }
 

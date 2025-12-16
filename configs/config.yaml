@@ -5,7 +5,76 @@ server:
 log:
   level: "info"
 
+# Legacy OpenAI config (used as fallback if no engine.routes configured)
 openai:
   api_key: ""
   base_url: "https://api.openai.com/v1"
   model: "gpt-3.5-turbo"
+
+# Transformation Engine Configuration
+# If routes are configured here, they take precedence over legacy openai config
+engine:
+  routes:
+    # Default OpenAI route - matches all requests with gpt models
+    - id: "openai-default"
+      matcher:
+        model: "^gpt-.*"  # Regex: matches gpt-3.5-turbo, gpt-4, etc.
+      upstream:
+        base_url: "https://aihubmix.com/v1"
+        path: "/chat/completions"
+        auth_strategy: "bearer"  # bearer, header, query
+        token_env: "AIGIS_OPENAI_API_KEY"  # Environment variable name
+      transforms:
+        - type: "pii"
+          config: {}  # Uses default patterns
+
+    # Example: Dify route (commented out)
+    # - id: "dify-workflow"
+    #   matcher:
+    #     model: "^dify-.*"
+    #   upstream:
+    #     base_url: "https://api.dify.ai/v1"
+    #     path: "/workflows/run"
+    #     auth_strategy: "bearer"
+    #     token_env: "DIFY_API_KEY"
+    #   transforms:
+    #     - type: "pii"
+    #       config: {}
+    #     - type: "template"
+    #       config:
+    #         template: |
+    #           {
+    #             "inputs": {
+    #               "query": "{{index .messages 0 "content"}}"
+    #             },
+    #             "response_mode": "blocking",
+    #             "user": "{{.user}}"
+    #           }
+
+    # Example: Field mapping transform (commented out)
+    # - id: "custom-api"
+    #   matcher:
+    #     model: "^custom-.*"
+    #   upstream:
+    #     base_url: "https://custom-api.example.com"
+    #     path: "/generate"
+    #     auth_strategy: "header"
+    #     header_name: "X-API-Key"
+    #     token_env: "CUSTOM_API_KEY"
+    #   transforms:
+    #     - type: "field_map"
+    #       config:
+    #         "prompt": "messages.0.content"  # target: source
+    #         "max_tokens": "max_tokens"
+
+    # Catch-all route (matches everything, should be last)
+    - id: "fallback"
+      matcher: {}  # Empty matcher = matches all
+      upstream:
+        base_url: "https://api.openai.com/v1"
+        path: "/chat/completions"
+        auth_strategy: "bearer"
+        token_env: "OPENAI_API_KEY"
+      transforms:
+        - type: "pii"
+          config: {}

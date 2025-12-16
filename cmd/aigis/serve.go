@@ -38,7 +38,10 @@ var serveCmd = &cobra.Command{
 		}
 
 		addr := fmt.Sprintf("%s:%d", host, port)
-		srv := server.NewHTTPServer(addr, globalLogger)
+		srv, err := server.NewHTTPServer(addr, globalLogger)
+		if err != nil {
+			return fmt.Errorf("failed to create server: %w", err)
+		}
 		return srv.Start()
 	},
 }

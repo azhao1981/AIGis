@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
+	"aigis/internal/config"
 	"aigis/internal/core"
+	"aigis/internal/core/engine"
 	"aigis/internal/core/processors"
 	"aigis/internal/core/providers"
 	"aigis/internal/pkg/logger"
@@ -24,47 +25,60 @@ import (
 type HTTPServer struct {
 	*Server
 	pipeline *core.Pipeline
-	provider core.Provider
+	engine   *engine.Engine
 	mux      *http.ServeMux
 	logger   *logger.Logger
 }
 
 // NewHTTPServer creates a new HTTP server with gateway capabilities
-func NewHTTPServer(addr string, zapLogger *zap.Logger) *HTTPServer {
+func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 	baseServer := New(addr)
 
 	// Wrap zap logger with our extension
 	extLogger := logger.NewLogger(zapLogger)
 
-	// Initialize pipeline
+	// Initialize pipeline (for logging processor only, transforms are in engine)
 	pipeline := core.NewPipeline()
 
-	// Register RequestLogger processor first
+	// Register RequestLogger processor
 	pipeline.AddProcessor(processors.NewRequestLogger())
 
-	// Register PII Guard processor
-	pipeline.AddProcessor(processors.NewPIIGuard())
-
-	// Initialize OpenAI provider from config
-	apiKey := viper.GetString("openai.api_key")
-	baseURL := viper.GetString("openai.base_url")
-	if baseURL == "" {
-		baseURL = "https://api.openai.com/v1"
+	// Load engine configuration
+	engineConfig, err := config.LoadEngineConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load engine config: %w", err)
 	}
 
-	provider := providers.NewOpenAIProvider(apiKey, baseURL)
+	// Create transformation engine
+	eng, err := engine.NewEngine(engineConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create engine: %w", err)
+	}
+
+	extLogger.Info("Engine initialized",
+		zap.Int("routes", len(engineConfig.Routes)),
+	)
+
+	// Log configured routes
+	for _, route := range engineConfig.Routes {
+		extLogger.Info("Route configured",
+			zap.String("id", route.ID),
+			zap.String("upstream", route.Upstream.BaseURL),
+			zap.Int("transforms", len(route.Transforms)),
+		)
+	}
 
 	s := &HTTPServer{
 		Server:   baseServer,
 		pipeline: pipeline,
-		provider: provider,
+		engine:   eng,
 		logger:   extLogger,
 	}
 
 	// Initialize mux
 	s.mux = s.setupRoutes()
 
-	return s
+	return s, nil
 }
 
 // setupRoutes creates and configures the HTTP routes
@@ -109,7 +123,6 @@ func (s *HTTPServer) Start() error {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		// Skip 0 层，显示这个 goroutine 的实际调用位置（Start 方法）
 		s.logger.Info("Starting AIGis", zap.String("addr", s.addr))
 		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			s.logger.Fatal("Server error", zap.Error(err))
@@ -117,7 +130,6 @@ func (s *HTTPServer) Start() error {
 	}()
 
 	<-stop
-	// Skip 0 层，因为包装器会自动 Skip 1
 	s.logger.Skip(0).Info("Shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -126,7 +138,7 @@ func (s *HTTPServer) Start() error {
 	return s.server.Shutdown(ctx)
 }
 
-// handleChatCompletions processes LLM requests through the pipeline
+// handleChatCompletions processes LLM requests through the engine
 func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Only accept POST requests
 	if r.Method != http.MethodPost {
@@ -140,7 +152,6 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 	// Read the raw body into []byte
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		// 不需要额外 Skip，因为包装器已经 Skip 了 1 层
 		s.logger.Error("Failed to read body", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to read body: %v", err), http.StatusBadRequest)
 		return
@@ -156,33 +167,52 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 		zap.String("trace_id", traceID),
 	)
 
-	// Create a GatewayContext - 需要获取底层的 zap.Logger
+	// Create a GatewayContext
 	ctx := core.NewGatewayContext(r.Context(), reqLogger.Logger)
 	ctx.RequestID = requestID
 	ctx.TraceID = traceID
 
-	// Execute the pipeline for request processing (PII redaction)
+	// Execute the pipeline for request logging
 	processedBody, err := s.pipeline.ExecuteRequest(ctx, body)
 	if err != nil {
-		// 不需要额外 Skip，因为包装器已经 Skip 了 1 层
 		reqLogger.Error("Pipeline error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Pipeline error: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Forward the processed request to OpenAI
-	resp, err := s.provider.Send(r.Context(), processedBody)
+	// Find matching route using engine
+	route, err := s.engine.FindRoute(processedBody)
 	if err != nil {
-		// 不需要额外 Skip，因为包装器已经 Skip 了 1 层
+		reqLogger.Error("Route matching error", zap.Error(err))
+		http.Error(w, fmt.Sprintf("Route matching error: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if route == nil {
+		reqLogger.Warn("No matching route found")
+		http.Error(w, "No matching route configured", http.StatusNotFound)
+		return
+	}
+
+	reqLogger.Info("Route matched",
+		zap.String("route_id", route.ID),
+		zap.String("upstream", route.Upstream.BaseURL),
+	)
+
+	// Create universal provider for this route
+	provider := providers.NewUniversalProvider(route)
+
+	// Send request through provider (includes transforms)
+	resp, err := provider.Send(r.Context(), processedBody)
+	if err != nil {
 		reqLogger.Error("Provider error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Provider error: %v", err), http.StatusBadGateway)
 		return
 	}
 
-	// Execute the pipeline for response processing
+	// Execute the pipeline for response processing (logging)
 	finalResp, err := s.pipeline.ExecuteResponse(ctx, resp)
 	if err != nil {
-		// 不需要额外 Skip，因为包装器已经 Skip 了 1 层
 		reqLogger.Error("Response pipeline error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Response pipeline error: %v", err), http.StatusInternalServerError)
 		return
