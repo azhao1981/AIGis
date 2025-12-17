@@ -200,7 +200,7 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 	)
 
 	// Create universal provider for this route
-	provider := providers.NewUniversalProvider(route)
+	provider := providers.NewUniversalProvider(route, reqLogger)
 
 	// Send request through provider (includes transforms and header handling)
 	resp, err := provider.Send(r.Context(), processedBody, r.Header)

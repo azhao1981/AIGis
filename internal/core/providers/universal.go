@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"regexp"
 	"text/template"
 	"time"
 
@@ -15,20 +14,32 @@ import (
 	"github.com/bytedance/sonic/ast"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"go.uber.org/zap"
 
 	"aigis/internal/core/engine"
+	"aigis/internal/core/security"
+	"aigis/internal/pkg/logger"
 )
 
 // UniversalProvider implements the core.Provider interface with configurable routing
 type UniversalProvider struct {
-	route  *engine.Route
-	client *http.Client
+	route   *engine.Route
+	client  *http.Client
+	scanner *security.Scanner
+	log     *logger.Logger
 }
 
 // NewUniversalProvider creates a new universal provider for the given route
-func NewUniversalProvider(route *engine.Route) *UniversalProvider {
+func NewUniversalProvider(route *engine.Route, log *logger.Logger) *UniversalProvider {
+	if log == nil {
+		// Create a default logger if none provided
+		zapLogger, _ := logger.New("info")
+		log = logger.NewLogger(zapLogger)
+	}
 	return &UniversalProvider{
-		route: route,
+		route:   route,
+		scanner: security.NewScanner(),
+		log:     log,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
@@ -164,26 +175,10 @@ func (p *UniversalProvider) buildAuthHeaders() http.Header {
 	return headers
 }
 
-// applyPIITransform redacts PII from the request body
+// applyPIITransform redacts sensitive information from the request body
 func (p *UniversalProvider) applyPIITransform(body []byte, config map[string]string) ([]byte, error) {
-	// Reuse patterns from pii_guard, or use custom patterns from config
-	emailPattern := config["email_pattern"]
-	if emailPattern == "" {
-		emailPattern = `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`
-	}
-	phonePattern := config["phone_pattern"]
-	if phonePattern == "" {
-		phonePattern = `(\+?\d{1,3}[-.\s]?)?(\(?\d{3,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{4}`
-	}
-
-	emailRegex, err := regexp.Compile(emailPattern)
-	if err != nil {
-		return nil, fmt.Errorf("invalid email pattern: %w", err)
-	}
-	phoneRegex, err := regexp.Compile(phonePattern)
-	if err != nil {
-		return nil, fmt.Errorf("invalid phone pattern: %w", err)
-	}
+	// Custom rules can be added from config later if needed
+	// For now, we use the scanner's built-in rules
 
 	root, err := sonic.Get(body)
 	if err != nil {
@@ -223,9 +218,7 @@ func (p *UniversalProvider) applyPIITransform(body []byte, config map[string]str
 			continue
 		}
 
-		newContent := contentStr
-		newContent = emailRegex.ReplaceAllString(newContent, "[EMAIL_REDACTED]")
-		newContent = phoneRegex.ReplaceAllString(newContent, "[PHONE_REDACTED]")
+		newContent := p.scanner.Sanitize(contentStr)
 
 		if newContent != contentStr {
 			msgNode.Set("content", ast.NewString(newContent))
@@ -239,47 +232,27 @@ func (p *UniversalProvider) applyPIITransform(body []byte, config map[string]str
 
 // applyClaudePIITransform redacts PII from Claude/Anthropic format request body
 // Claude format:
-// {
-//   "system": "...",  // optional top-level string
-//   "messages": [
-//     {
-//       "role": "user",
-//       "content": "..."  // can be string OR array of blocks
-//     },
-//     {
-//       "role": "assistant",
-//       "content": [
-//         {"type": "text", "text": "..."},
-//         {"type": "image", ...}
-//       ]
-//     }
-//   ]
-// }
+//
+//	{
+//	  "system": "...",  // optional top-level string
+//	  "messages": [
+//	    {
+//	      "role": "user",
+//	      "content": "..."  // can be string OR array of blocks
+//	    },
+//	    {
+//	      "role": "assistant",
+//	      "content": [
+//	        {"type": "text", "text": "..."},
+//	        {"type": "image", ...}
+//	      ]
+//	    }
+//	  ]
+//	}
 func (p *UniversalProvider) applyClaudePIITransform(body []byte, config map[string]string) ([]byte, error) {
-	// Get email/phone patterns from config or use defaults
-	emailPattern := config["email_pattern"]
-	if emailPattern == "" {
-		emailPattern = `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`
-	}
-	phonePattern := config["phone_pattern"]
-	if phonePattern == "" {
-		phonePattern = `(\+?\d{1,3}[-.\s]?)?(\(?\d{3,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{4}`
-	}
-
-	emailRegex, err := regexp.Compile(emailPattern)
-	if err != nil {
-		return nil, fmt.Errorf("invalid email pattern: %w", err)
-	}
-	phoneRegex, err := regexp.Compile(phonePattern)
-	if err != nil {
-		return nil, fmt.Errorf("invalid phone pattern: %w", err)
-	}
-
-	// Helper function to redact PII from a string
+	// Helper function to redact using scanner
 	redact := func(s string) string {
-		result := emailRegex.ReplaceAllString(s, "[EMAIL_REDACTED]")
-		result = phoneRegex.ReplaceAllString(result, "[PHONE_REDACTED]")
-		return result
+		return p.scanner.Sanitize(s)
 	}
 
 	// Parse the body as Sonic AST
@@ -375,7 +348,13 @@ func (p *UniversalProvider) applyClaudePIITransform(body []byte, config map[stri
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("[DEBUG] applyClaudePIITransform - AFTER: %s\n", string(result))
+
+	// Debug logging after redaction
+	p.log.Debug("Claude PII transform applied",
+		zap.String("original", string(body)),
+		zap.String("redacted", string(result)),
+	)
+
 	return result, nil
 }
 

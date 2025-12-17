@@ -3,7 +3,7 @@ server:
   port: 8080
 
 log:
-  level: "info"
+  level: "debug"
 
 # Legacy OpenAI config (used as fallback if no engine.routes configured)
 openai:
