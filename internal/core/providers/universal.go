@@ -351,7 +351,7 @@ func (p *UniversalProvider) applyClaudePIITransform(body []byte, config map[stri
 
 	// Debug logging after redaction
 	p.log.Debug("Claude PII transform applied",
-		zap.String("original", string(body)),
+		// zap.String("original", string(body)),
 		zap.String("redacted", string(result)),
 	)
 

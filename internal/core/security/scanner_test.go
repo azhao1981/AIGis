@@ -69,6 +69,13 @@ func TestSanitizeOpenAI(t *testing.T) {
 	if !strings.Contains(result2, "[OPENAI_KEY_REDACTED]") {
 		t.Errorf("Expected OpenAI proj key to be redacted, got: %s", result2)
 	}
+
+	// Test with uppercase letters (real format from user's example)
+	input3 := "sk-sScxOi4A6BhYh8DY891b1dB95d2f42918a71F50f54C9690b"
+	result3 := scanner.Sanitize(input3)
+	if !strings.Contains(result3, "[OPENAI_KEY_REDACTED]") {
+		t.Errorf("Expected uppercase OpenAI key to be redacted, got: %s", result3)
+	}
 }
 
 func TestSanitizeGitHub(t *testing.T) {

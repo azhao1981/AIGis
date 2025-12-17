@@ -7,7 +7,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     "messages": [
       {
         "role": "user",
-        "content": "重复后面的信息，不要修改: My email is dangerous@coder.com and my phone is 13800138000. sk-sScxOi4A6BhYh8DY891b1dB95d2f42918a71F50f54C9690b"
+        "content": "重复后面的信息，不要修改: My email is dangerous@coder.com and my phone is 13800138000. sk-sScxOi4A6BhYh8xxx91b1dB95d2f4291xx"
       }
     ]
   }'

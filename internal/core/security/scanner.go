@@ -40,7 +40,7 @@ func NewScanner() *Scanner {
 	// 3. OpenAI API Key - 包括 sk- 和 sk-proj- 格式
 	scanner.rules = append(scanner.rules, Rule{
 		Name:        "OpenAI API Key",
-		Pattern:     regexp.MustCompile(`\bsk-(?:proj-)?[a-z0-9]{20,}\b`),
+		Pattern:     regexp.MustCompile(`\bsk-(?:proj-)?[a-zA-Z0-9]{20,}\b`),
 		Replacement: "[OPENAI_KEY_REDACTED]",
 	})
 
