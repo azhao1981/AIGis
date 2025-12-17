@@ -83,32 +83,5 @@ func LoadEngineConfig() (*engine.EngineConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal engine config: %w", err)
 	}
 
-	// If no routes configured, create a default OpenAI route for backward compatibility
-	if len(config.Routes) == 0 {
-		config.Routes = []engine.Route{
-			{
-				ID:      "default-openai",
-				Matcher: map[string]string{}, // Match all requests
-				Upstream: engine.Upstream{
-					BaseURL:      viper.GetString("openai.base_url"),
-					Path:         "/chat/completions",
-					AuthStrategy: engine.AuthStrategyBearer,
-					TokenEnv:     "OPENAI_API_KEY",
-				},
-				Transforms: []engine.TransformStep{
-					{
-						Type:   engine.TransformTypePII,
-						Config: map[string]string{},
-					},
-				},
-			},
-		}
-
-		// Use legacy openai config if available
-		if apiKey := viper.GetString("openai.api_key"); apiKey != "" {
-			os.Setenv("OPENAI_API_KEY", apiKey)
-		}
-	}
-
 	return &config, nil
 }
