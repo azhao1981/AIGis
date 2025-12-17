@@ -40,16 +40,16 @@ func (p *UniversalProvider) ID() string {
 	return p.route.ID
 }
 
-// Send sends a request through the transformation pipeline to the upstream
-func (p *UniversalProvider) Send(ctx context.Context, body []byte) ([]byte, error) {
+// Send sends a request through the transformation pipeline to the upstream with header handling
+func (p *UniversalProvider) Send(ctx context.Context, body []byte, originalHeaders http.Header) ([]byte, error) {
 	// Step 1: Apply request transforms
 	transformedBody, err := p.applyRequestTransforms(body)
 	if err != nil {
 		return nil, fmt.Errorf("transform error: %w", err)
 	}
 
-	// Step 2: Prepare and send request
-	respBody, err := p.sendToUpstream(ctx, transformedBody)
+	// Step 2: Prepare and send request with headers
+	respBody, err := p.sendToUpstream(ctx, transformedBody, originalHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func (p *UniversalProvider) Send(ctx context.Context, body []byte) ([]byte, erro
 }
 
 // Stream sends a streaming request (not implemented yet)
-func (p *UniversalProvider) Stream(ctx context.Context, body []byte) (<-chan []byte, error) {
+func (p *UniversalProvider) Stream(ctx context.Context, body []byte, originalHeaders http.Header) (<-chan []byte, error) {
 	return nil, fmt.Errorf("streaming not implemented")
 }
 
@@ -72,6 +72,8 @@ func (p *UniversalProvider) applyRequestTransforms(body []byte) ([]byte, error) 
 		switch step.Type {
 		case engine.TransformTypePII:
 			result, err = p.applyPIITransform(result, step.Config)
+		case engine.TransformTypePIIClaude:
+			result, err = p.applyClaudePIITransform(result, step.Config)
 		case engine.TransformTypeFieldMap:
 			result, err = p.applyFieldMapTransform(result, step.Config)
 		case engine.TransformTypeTemplate:
@@ -86,6 +88,80 @@ func (p *UniversalProvider) applyRequestTransforms(body []byte) ([]byte, error) 
 	}
 
 	return result, nil
+}
+
+// buildUpstreamHeaders constructs headers for upstream request based on HeaderPolicy
+func (p *UniversalProvider) buildUpstreamHeaders(originalHeaders http.Header, authHeader http.Header) http.Header {
+	upstreamHeaders := make(http.Header)
+
+	// 1. Allow: Copy headers from Allow list
+	for _, headerName := range p.route.HeaderPolicy.Allow {
+		if value := originalHeaders.Get(headerName); value != "" {
+			upstreamHeaders.Set(headerName, value)
+		}
+	}
+
+	// 2. Set: Force set headers from config
+	for key, value := range p.route.HeaderPolicy.Set {
+		// Check for env:VAR syntax
+		if len(value) >= 4 && value[:4] == "env:" {
+			envVar := value[4:]
+			envValue := os.Getenv(envVar)
+			if envValue != "" {
+				upstreamHeaders.Set(key, envValue)
+			}
+		} else {
+			// Literal value
+			upstreamHeaders.Set(key, value)
+		}
+	}
+
+	// 3. Remove: Remove headers from Remove list
+	for _, headerName := range p.route.HeaderPolicy.Remove {
+		upstreamHeaders.Del(headerName)
+	}
+
+	// 4. Auth: Add authentication headers (these override both Allow and Remove)
+	for key, values := range authHeader {
+		for _, value := range values {
+			upstreamHeaders.Add(key, value)
+		}
+	}
+
+	// Always ensure Content-Type is set
+	if upstreamHeaders.Get("Content-Type") == "" {
+		upstreamHeaders.Set("Content-Type", "application/json")
+	}
+
+	return upstreamHeaders
+}
+
+// buildAuthHeaders constructs authentication headers based on the route's AuthStrategy
+func (p *UniversalProvider) buildAuthHeaders() http.Header {
+	headers := make(http.Header)
+	upstream := p.route.Upstream
+
+	token := os.Getenv(upstream.TokenEnv)
+	if token == "" {
+		return headers
+	}
+
+	switch upstream.AuthStrategy {
+	case engine.AuthStrategyBearer:
+		headers.Set("Authorization", "Bearer "+token)
+	case engine.AuthStrategyHeader:
+		headerName := upstream.HeaderName
+		if headerName == "" {
+			headerName = "Authorization"
+		}
+		headers.Set(headerName, token)
+	// AuthStrategyQuery is handled in buildUpstreamURL or query params, not headers
+	// We handle default (bearer) as well
+	default:
+		headers.Set("Authorization", "Bearer "+token)
+	}
+
+	return headers
 }
 
 // applyPIITransform redacts PII from the request body
@@ -161,6 +237,143 @@ func (p *UniversalProvider) applyPIITransform(body []byte, config map[string]str
 	return root.MarshalJSON()
 }
 
+// applyClaudePIITransform redacts PII from Claude/Anthropic format request body
+// Claude format:
+// {
+//   "system": "...",  // optional top-level string
+//   "messages": [
+//     {
+//       "role": "user",
+//       "content": "..."  // can be string OR array of blocks
+//     },
+//     {
+//       "role": "assistant",
+//       "content": [
+//         {"type": "text", "text": "..."},
+//         {"type": "image", ...}
+//       ]
+//     }
+//   ]
+// }
+func (p *UniversalProvider) applyClaudePIITransform(body []byte, config map[string]string) ([]byte, error) {
+	// Get email/phone patterns from config or use defaults
+	emailPattern := config["email_pattern"]
+	if emailPattern == "" {
+		emailPattern = `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`
+	}
+	phonePattern := config["phone_pattern"]
+	if phonePattern == "" {
+		phonePattern = `(\+?\d{1,3}[-.\s]?)?(\(?\d{3,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{4}`
+	}
+
+	emailRegex, err := regexp.Compile(emailPattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid email pattern: %w", err)
+	}
+	phoneRegex, err := regexp.Compile(phonePattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid phone pattern: %w", err)
+	}
+
+	// Helper function to redact PII from a string
+	redact := func(s string) string {
+		result := emailRegex.ReplaceAllString(s, "[EMAIL_REDACTED]")
+		result = phoneRegex.ReplaceAllString(result, "[PHONE_REDACTED]")
+		return result
+	}
+
+	// Parse the body as Sonic AST
+	root, err := sonic.Get(body)
+	if err != nil {
+		return body, nil // Return original if parse fails
+	}
+
+	// 1. Handle top-level "system" field (if it exists and is a string)
+	systemNode := root.Get("system")
+	if err := systemNode.Check(); err == nil && systemNode.Type() == ast.V_STRING {
+		if systemStr, err := systemNode.String(); err == nil {
+			redactedSystem := redact(systemStr)
+			if redactedSystem != systemStr {
+				root.Set("system", ast.NewString(redactedSystem))
+			}
+		}
+	}
+
+	// 2. Handle "messages" array
+	messagesNode := root.Get("messages")
+	if err := messagesNode.Check(); err != nil {
+		return root.MarshalJSON() // No messages, return modified root
+	}
+
+	if messagesNode.Type() != ast.V_ARRAY {
+		return root.MarshalJSON()
+	}
+
+	// Iterate through messages
+	msgIdx := 0
+	for {
+		msgNode := messagesNode.Index(msgIdx)
+		if err := msgNode.Check(); err != nil {
+			break
+		}
+
+		// Get the "content" field of this message
+		contentNode := msgNode.Get("content")
+		if err := contentNode.Check(); err != nil {
+			msgIdx++
+			continue
+		}
+
+		// Content can be either:
+		// - A string (simple case, like OpenAI)
+		// - An array of blocks (Claude blocks)
+
+		if contentNode.Type() == ast.V_STRING {
+			// Simple string content
+			if contentStr, err := contentNode.String(); err == nil {
+				redactedContent := redact(contentStr)
+				if redactedContent != contentStr {
+					msgNode.Set("content", ast.NewString(redactedContent))
+				}
+			}
+		} else if contentNode.Type() == ast.V_ARRAY {
+			// Array of blocks (Claude format)
+			blockIdx := 0
+			for {
+				blockNode := contentNode.Index(blockIdx)
+				if err := blockNode.Check(); err != nil {
+					break
+				}
+
+				// Check if this is a text block
+				typeNode := blockNode.Get("type")
+				textNode := blockNode.Get("text")
+
+				typeNodeErr := typeNode.Check()
+				textNodeErr := textNode.Check()
+				if typeNodeErr == nil && textNodeErr == nil {
+					typeStr, typeErr := typeNode.String()
+					textStr, textErr := textNode.String()
+
+					if typeErr == nil && textErr == nil && typeStr == "text" {
+						// Redact the "text" field
+						redactedText := redact(textStr)
+						if redactedText != textStr {
+							blockNode.Set("text", ast.NewString(redactedText))
+						}
+					}
+				}
+
+				blockIdx++
+			}
+		}
+
+		msgIdx++
+	}
+
+	return root.MarshalJSON()
+}
+
 // applyFieldMapTransform maps fields from source to target using gjson/sjson
 func (p *UniversalProvider) applyFieldMapTransform(body []byte, config map[string]string) ([]byte, error) {
 	result := body
@@ -228,16 +441,37 @@ func (p *UniversalProvider) applyTemplateTransform(body []byte, config map[strin
 	return result, nil
 }
 
-// sendToUpstream sends the transformed request to the upstream service
-func (p *UniversalProvider) sendToUpstream(ctx context.Context, body []byte) ([]byte, error) {
+// sendToUpstream sends the transformed request to the upstream service with header handling
+func (p *UniversalProvider) sendToUpstream(ctx context.Context, body []byte, originalHeaders http.Header) ([]byte, error) {
 	upstream := p.route.Upstream
+
+	// Build base URL (support env:VAR syntax)
+	baseURL := upstream.BaseURL
+	if len(baseURL) >= 4 && baseURL[:4] == "env:" {
+		envVar := baseURL[4:]
+		baseURL = os.Getenv(envVar)
+	}
 
 	// Build URL
 	path := upstream.Path
 	if path == "" {
 		path = "/chat/completions" // Default for OpenAI compatibility
 	}
-	url := upstream.BaseURL + path
+	url := baseURL + path
+
+	// Handle query params for AuthStrategyQuery
+	if upstream.AuthStrategy == engine.AuthStrategyQuery {
+		token := os.Getenv(upstream.TokenEnv)
+		if token != "" {
+			// Parse URL and add query param
+			if reqURL, err := http.NewRequest(http.MethodPost, url, nil); err == nil {
+				q := reqURL.URL.Query()
+				q.Set("api_key", token) // Common query param name
+				reqURL.URL.RawQuery = q.Encode()
+				url = reqURL.URL.String()
+			}
+		}
+	}
 
 	// Create request
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -245,28 +479,16 @@ func (p *UniversalProvider) sendToUpstream(ctx context.Context, body []byte) ([]
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set content type
-	httpReq.Header.Set("Content-Type", "application/json")
+	// Build auth headers
+	authHeaders := p.buildAuthHeaders()
 
-	// Set authentication based on strategy
-	token := os.Getenv(upstream.TokenEnv)
-	if token != "" {
-		switch upstream.AuthStrategy {
-		case engine.AuthStrategyBearer:
-			httpReq.Header.Set("Authorization", "Bearer "+token)
-		case engine.AuthStrategyHeader:
-			headerName := upstream.HeaderName
-			if headerName == "" {
-				headerName = "Authorization"
-			}
-			httpReq.Header.Set(headerName, token)
-		case engine.AuthStrategyQuery:
-			q := httpReq.URL.Query()
-			q.Set("api_key", token) // Common query param name
-			httpReq.URL.RawQuery = q.Encode()
-		default:
-			// Default to bearer
-			httpReq.Header.Set("Authorization", "Bearer "+token)
+	// Build all upstream headers using HeaderPolicy
+	upstreamHeaders := p.buildUpstreamHeaders(originalHeaders, authHeaders)
+
+	// Apply headers to request
+	for key, values := range upstreamHeaders {
+		for _, value := range values {
+			httpReq.Header.Add(key, value)
 		}
 	}
 

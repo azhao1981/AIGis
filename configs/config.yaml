@@ -27,7 +27,25 @@ engine:
       transforms:
         - type: "pii"
           config: {}  # Uses default patterns
+    - id: "claude-proxy"
+      matcher:
+        model: "^claude.*" 
+      upstream:
+        base_url: "env:AIGIS_ANTHROPIC_BASE_URL" # 或者你的中转地址
+        path: "/messages"
+        # 注意：Claude 不使用 Bearer Token，而是 header 里的 x-api-key
+        # 所以这里 auth_strategy 设为 none，我们用 header_policy 来处理
+        auth_strategy: "none" 
+      
+      header_policy:
+        allow: ["anthropic-version", "content-type", "anthropic-beta"]
+        set:
+          "x-api-key": "env:AIGIS_ANTHROPIC_KEY" # 你的真实 Key
+        remove: ["authorization"] # 移除可能误传的 Bearer
 
+      transforms:
+        - type: "pii_claude"
+          config: {}
     # Example: Dify route (commented out)
     # - id: "dify-workflow"
     #   matcher:

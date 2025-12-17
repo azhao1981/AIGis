@@ -1,0 +1,13 @@
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-haiku-20241022",
+    "max_tokens": 100,
+    "system": "You are a helpful assistant.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "重复后面的信息，不要修改: My email is dangerous@coder.com and my phone is 13800138000."
+      }
+    ]
+  }'

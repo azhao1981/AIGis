@@ -9,12 +9,24 @@ type EngineConfig struct {
 type Route struct {
 	// ID is the unique identifier for this route
 	ID string `mapstructure:"id"`
-	// Matcher maps JSON path (e.g., "model") to regex pattern (e.g., "^gpt-.*")
+	// Matcher maps JSON path (e.g., "model") to regex pattern (e.g., "gpt-.*")
 	Matcher map[string]string `mapstructure:"matcher"`
 	// Upstream defines the target backend service
 	Upstream Upstream `mapstructure:"upstream"`
 	// Transforms is the pipeline of transformations to apply
 	Transforms []TransformStep `mapstructure:"transforms"`
+	// HeaderPolicy defines how to handle HTTP headers
+	HeaderPolicy HeaderPolicy `mapstructure:"header_policy"`
+}
+
+// HeaderPolicy defines rules for handling HTTP headers
+type HeaderPolicy struct {
+	// Allow lists headers to pass through from client requests
+	Allow []string `mapstructure:"allow"`
+	// Set maps headers to force set (supports "env:VAR" syntax for env vars)
+	Set map[string]string `mapstructure:"set"`
+	// Remove lists headers to exclude from upstream requests
+	Remove []string `mapstructure:"remove"`
 }
 
 // Upstream defines the backend service configuration
@@ -48,7 +60,8 @@ const (
 
 // TransformType constants
 const (
-	TransformTypePII      = "pii"       // PII redaction
+	TransformTypePII      = "pii"       // PII redaction (OpenAI format)
+	TransformTypePIIClaude = "pii_claude" // PII redaction (Claude/Anthropic format)
 	TransformTypeFieldMap = "field_map" // Field mapping using gjson/sjson
 	TransformTypeTemplate = "template"  // Go text/template transformation
 )
