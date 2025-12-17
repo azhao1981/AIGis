@@ -371,7 +371,12 @@ func (p *UniversalProvider) applyClaudePIITransform(body []byte, config map[stri
 		msgIdx++
 	}
 
-	return root.MarshalJSON()
+	result, err := root.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("[DEBUG] applyClaudePIITransform - AFTER: %s\n", string(result))
+	return result, nil
 }
 
 // applyFieldMapTransform maps fields from source to target using gjson/sjson
