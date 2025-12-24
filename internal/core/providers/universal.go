@@ -16,6 +16,7 @@ import (
 	"github.com/tidwall/sjson"
 	"go.uber.org/zap"
 
+	"aigis/internal/core"
 	"aigis/internal/core/engine"
 	"aigis/internal/core/security"
 	"aigis/internal/pkg/logger"
@@ -52,21 +53,26 @@ func (p *UniversalProvider) ID() string {
 }
 
 // Send sends a request through the transformation pipeline to the upstream with header handling
-func (p *UniversalProvider) Send(ctx context.Context, body []byte, originalHeaders http.Header) ([]byte, error) {
-	// Step 1: Apply request transforms
-	transformedBody, err := p.applyRequestTransforms(body)
+func (p *UniversalProvider) Send(ctx *core.AIGisContext, body []byte, originalHeaders http.Header) ([]byte, error) {
+	// Step 1: Apply request transforms (with bidirectional tokenization)
+	transformedBody, err := p.applyRequestTransforms(ctx, body)
 	if err != nil {
 		return nil, fmt.Errorf("transform error: %w", err)
 	}
 
 	// Step 2: Prepare and send request with headers
-	respBody, err := p.sendToUpstream(ctx, transformedBody, originalHeaders)
+	respBody, err := p.sendToUpstream(ctx.Context, transformedBody, originalHeaders)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 3: Apply response transforms (optional, passthrough for now)
-	return respBody, nil
+	// Step 3: Apply response transforms - unmask placeholders in response content
+	finalResp, err := p.applyResponseTransforms(ctx, respBody)
+	if err != nil {
+		return nil, fmt.Errorf("response transform error: %w", err)
+	}
+
+	return finalResp, nil
 }
 
 // Stream sends a streaming request (not implemented yet)
@@ -75,16 +81,16 @@ func (p *UniversalProvider) Stream(ctx context.Context, body []byte, originalHea
 }
 
 // applyRequestTransforms applies all configured transformations to the request body
-func (p *UniversalProvider) applyRequestTransforms(body []byte) ([]byte, error) {
+func (p *UniversalProvider) applyRequestTransforms(ctx *core.AIGisContext, body []byte) ([]byte, error) {
 	result := body
 
 	for _, step := range p.route.Transforms {
 		var err error
 		switch step.Type {
 		case engine.TransformTypePII:
-			result, err = p.applyPIITransform(result, step.Config)
+			result, err = p.applyPIITransform(ctx, result, step.Config)
 		case engine.TransformTypePIIClaude:
-			result, err = p.applyClaudePIITransform(result, step.Config)
+			result, err = p.applyClaudePIITransform(ctx, result, step.Config)
 		case engine.TransformTypeFieldMap:
 			result, err = p.applyFieldMapTransform(result, step.Config)
 		case engine.TransformTypeTemplate:
@@ -175,8 +181,8 @@ func (p *UniversalProvider) buildAuthHeaders() http.Header {
 	return headers
 }
 
-// applyPIITransform redacts sensitive information from the request body
-func (p *UniversalProvider) applyPIITransform(body []byte, config map[string]string) ([]byte, error) {
+// applyPIITransform redacts sensitive information from the request body using bidirectional tokenization
+func (p *UniversalProvider) applyPIITransform(ctx *core.AIGisContext, body []byte, config map[string]string) ([]byte, error) {
 	// Custom rules can be added from config later if needed
 	// For now, we use the scanner's built-in rules
 
@@ -218,7 +224,8 @@ func (p *UniversalProvider) applyPIITransform(body []byte, config map[string]str
 			continue
 		}
 
-		newContent := p.scanner.Sanitize(contentStr)
+		// Use Mask() for bidirectional tokenization instead of Sanitize()
+		newContent := p.scanner.Mask(ctx, contentStr, nil)
 
 		if newContent != contentStr {
 			msgNode.Set("content", ast.NewString(newContent))
@@ -230,7 +237,7 @@ func (p *UniversalProvider) applyPIITransform(body []byte, config map[string]str
 	return root.MarshalJSON()
 }
 
-// applyClaudePIITransform redacts PII from Claude/Anthropic format request body
+// applyClaudePIITransform redacts PII from Claude/Anthropic format request body using bidirectional tokenization
 // Claude format:
 //
 //	{
@@ -249,10 +256,10 @@ func (p *UniversalProvider) applyPIITransform(body []byte, config map[string]str
 //	    }
 //	  ]
 //	}
-func (p *UniversalProvider) applyClaudePIITransform(body []byte, config map[string]string) ([]byte, error) {
-	// Helper function to redact using scanner
+func (p *UniversalProvider) applyClaudePIITransform(ctx *core.AIGisContext, body []byte, config map[string]string) ([]byte, error) {
+	// Helper function to redact using scanner with Mask()
 	redact := func(s string) string {
-		return p.scanner.Sanitize(s)
+		return p.scanner.Mask(ctx, s, nil)
 	}
 
 	// Parse the body as Sonic AST
@@ -329,7 +336,7 @@ func (p *UniversalProvider) applyClaudePIITransform(body []byte, config map[stri
 					textStr, textErr := textNode.String()
 
 					if typeErr == nil && textErr == nil && typeStr == "text" {
-						// Redact the "text" field
+						// Redact the "text" field using Mask()
 						redactedText := redact(textStr)
 						if redactedText != textStr {
 							blockNode.Set("text", ast.NewString(redactedText))
@@ -423,6 +430,89 @@ func (p *UniversalProvider) applyTemplateTransform(body []byte, config map[strin
 	}
 
 	return result, nil
+}
+
+// applyResponseTransforms unmask placeholders in the response body
+// This restores the original secrets from the vault, only in content fields
+func (p *UniversalProvider) applyResponseTransforms(ctx *core.AIGisContext, body []byte) ([]byte, error) {
+	// Parse the response body
+	root, err := sonic.Get(body)
+	if err != nil {
+		return body, nil // Return original if parse fails
+	}
+
+	// Handle different response formats
+
+	// 1. OpenAI format: choices[].message.content
+	choicesNode := root.Get("choices")
+	if err := choicesNode.Check(); err == nil && choicesNode.Type() == ast.V_ARRAY {
+		i := 0
+		for {
+			choiceNode := choicesNode.Index(i)
+			if err := choiceNode.Check(); err != nil {
+				break
+			}
+
+			messageNode := choiceNode.Get("message")
+			if err := messageNode.Check(); err != nil {
+				i++
+				continue
+			}
+
+			contentNode := messageNode.Get("content")
+			if err := contentNode.Check(); err != nil {
+				i++
+				continue
+			}
+
+			if contentNode.Type() == ast.V_STRING {
+				if contentStr, err := contentNode.String(); err == nil {
+					// Unmask placeholders in content
+					unmaskedContent := p.scanner.Unmask(ctx, contentStr)
+					if unmaskedContent != contentStr {
+						messageNode.Set("content", ast.NewString(unmaskedContent))
+					}
+				}
+			}
+
+			i++
+		}
+	}
+
+	// 2. Claude format: content[].text (array of blocks)
+	contentNode := root.Get("content")
+	if err := contentNode.Check(); err == nil && contentNode.Type() == ast.V_ARRAY {
+		i := 0
+		for {
+			blockNode := contentNode.Index(i)
+			if err := blockNode.Check(); err != nil {
+				break
+			}
+
+			// Check if this is a text block
+			typeNode := blockNode.Get("type")
+			textNode := blockNode.Get("text")
+
+			typeNodeErr := typeNode.Check()
+			textNodeErr := textNode.Check()
+			if typeNodeErr == nil && textNodeErr == nil {
+				typeStr, typeErr := typeNode.String()
+				textStr, textErr := textNode.String()
+
+				if typeErr == nil && textErr == nil && typeStr == "text" {
+					// Unmask placeholders in text
+					unmaskedText := p.scanner.Unmask(ctx, textStr)
+					if unmaskedText != textStr {
+						blockNode.Set("text", ast.NewString(unmaskedText))
+					}
+				}
+			}
+
+			i++
+		}
+	}
+
+	return root.MarshalJSON()
 }
 
 // sendToUpstream sends the transformed request to the upstream service with header handling

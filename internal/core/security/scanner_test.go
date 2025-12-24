@@ -5,6 +5,27 @@ import (
 	"testing"
 )
 
+// MockVaultContext is a mock implementation for testing
+type MockVaultContext struct {
+	vault map[string]string
+}
+
+func (m *MockVaultContext) VaultStore(placeholder, original string) {
+	if m.vault == nil {
+		m.vault = make(map[string]string)
+	}
+	m.vault[placeholder] = original
+}
+
+func (m *MockVaultContext) VaultGet(placeholder string) (string, bool) {
+	if m.vault == nil {
+		return "", false
+	}
+	original, ok := m.vault[placeholder]
+	return original, ok
+}
+
+
 func TestNewScanner(t *testing.T) {
 	scanner := NewScanner()
 	if scanner == nil {
@@ -221,5 +242,150 @@ func TestGetRules(t *testing.T) {
 
 	if len(newRules) != originalCount {
 		t.Error("Rules count should not change")
+	}
+}
+
+func TestMaskUnmask(t *testing.T) {
+	scanner := NewScanner()
+	ctx := &MockVaultContext{}
+
+	testCases := []struct {
+		name     string
+		input    string
+		contains []string // substrings that should be found in masked output
+	}{
+		{
+			name:     "Email",
+			input:    "Contact me at test@example.com for details",
+			contains: []string{"__AIGIS_SEC_"},
+		},
+		{
+			name:     "Phone",
+			input:    "Call me at 13800138000 anytime",
+			contains: []string{"__AIGIS_SEC_"},
+		},
+		{
+			name:     "API Key",
+			input:    "Use sk-proj-abc123def456789012345 for authentication",
+			contains: []string{"__AIGIS_SEC_"},
+		},
+		{
+			name:     "Multiple PII",
+			input:    "Email: test@example.com, Phone: 13800138000",
+			contains: []string{"__AIGIS_SEC_", "__AIGIS_SEC_"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset vault for each test
+			ctx.vault = make(map[string]string)
+
+			// Test Mask
+			masked := scanner.Mask(ctx, tc.input, nil)
+
+			// Verify masking occurred
+			for _, substr := range tc.contains {
+				if !strings.Contains(masked, substr) {
+					t.Errorf("Mask() output should contain placeholder pattern")
+				}
+			}
+
+			// Verify original is NOT in masked output
+			if masked == tc.input {
+				t.Errorf("Mask() should modify the input")
+			}
+
+			// Verify vault has mappings
+			if len(ctx.vault) == 0 {
+				t.Errorf("Mask() should store mappings in vault")
+			}
+
+			// Test Unmask
+			unmasked := scanner.Unmask(ctx, masked)
+
+			// Verify unmasking restored the original
+			if unmasked != tc.input {
+				t.Errorf("Unmask() = %v, want %v", unmasked, tc.input)
+			}
+		})
+	}
+}
+
+func TestMaskUnmaskDeterministic(t *testing.T) {
+	scanner := NewScanner()
+	ctx := &MockVaultContext{}
+
+	input := "test@example.com"
+
+	// First masking
+	masked1 := scanner.Mask(ctx, input, nil)
+
+	// Second masking (should use same placeholder)
+	masked2 := scanner.Mask(ctx, input, nil)
+
+	// Same input should generate same placeholder
+	if masked1 != masked2 {
+		t.Errorf("Mask() should be deterministic for same input: %v != %v", masked1, masked2)
+	}
+
+	// Verify vault has only one entry (same placeholder)
+	if len(ctx.vault) != 1 {
+		t.Errorf("Vault should have 1 entry, got %d", len(ctx.vault))
+	}
+}
+
+func TestMaskWithTags(t *testing.T) {
+	scanner := NewScanner()
+	ctx := &MockVaultContext{}
+
+	input := "Email: test@example.com, Phone: 13800138000"
+
+	// Mask only Email
+	masked := scanner.Mask(ctx, input, []string{"Email"})
+
+	// Should contain placeholder for email
+	if !strings.Contains(masked, "__AIGIS_SEC_") {
+		t.Errorf("Mask() with tag should mask matching rule")
+	}
+
+	// Should still contain phone (not masked)
+	if !strings.Contains(masked, "13800138000") {
+		t.Errorf("Mask() with specific tag should not mask non-matching rules")
+	}
+
+	// Verify vault has only email mapping
+	if len(ctx.vault) != 1 {
+		t.Errorf("Vault should have 1 entry for email only, got %d", len(ctx.vault))
+	}
+}
+
+func TestUnmaskWithNoVault(t *testing.T) {
+	scanner := NewScanner()
+
+	input := "Some text with __AIGIS_SEC_abc123def456__ placeholder"
+
+	// Unmask with nil context should return input as-is
+	result := scanner.Unmask(nil, input)
+
+	if result != input {
+		t.Errorf("Unmask() with nil context should return input unchanged")
+	}
+}
+
+func TestSanitizeBackwardCompatibility(t *testing.T) {
+	scanner := NewScanner()
+
+	input := "Contact me at test@example.com for details"
+	sanitized := scanner.Sanitize(input)
+
+	// Should use [REDACTED] style placeholders
+	if !strings.Contains(sanitized, "[EMAIL_REDACTED]") {
+		t.Errorf("Sanitize() should use [REDACTED] placeholders")
+	}
+
+	// Should NOT use vault-style placeholders
+	if strings.Contains(sanitized, "__AIGIS_SEC_") {
+		t.Errorf("Sanitize() should not use vault placeholders")
 	}
 }

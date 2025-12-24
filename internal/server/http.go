@@ -203,7 +203,8 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 	provider := providers.NewUniversalProvider(route, reqLogger)
 
 	// Send request through provider (includes transforms and header handling)
-	resp, err := provider.Send(r.Context(), processedBody, r.Header)
+	// Pass the AIGisContext (ctx) instead of r.Context() for bidirectional tokenization
+	resp, err := provider.Send(ctx, processedBody, r.Header)
 	if err != nil {
 		reqLogger.Error("Provider error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Provider error: %v", err), http.StatusBadGateway)

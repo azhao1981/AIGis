@@ -1,6 +1,9 @@
 package security
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"regexp"
 )
 
@@ -86,6 +89,88 @@ func (s *Scanner) Sanitize(input string) string {
 	}
 	return result
 }
+
+// generatePlaceholder generates a unique placeholder for a secret using SHA256 hash
+// Format: __AIGIS_SEC_<first 12 chars of SHA256>__
+// Using hash ensures the same secret always gets the same placeholder within the request
+func generatePlaceholder(original string) string {
+	hash := sha256.Sum256([]byte(original))
+	hashHex := hex.EncodeToString(hash[:])[:12]
+	return fmt.Sprintf("__AIGIS_SEC_%s__", hashHex)
+}
+
+// Mask replaces sensitive information with placeholders and stores the mapping in the vault
+// This is for bidirectional tokenization - use Unmask() to restore the original values
+func (s *Scanner) Mask(ctx interface{}, input string, tags []string) string {
+	// ctx should be *core.AIGisContext, but we use interface{} to avoid circular import
+	// We'll type-assert the vault methods
+
+	result := input
+	for _, rule := range s.rules {
+		// Check if this rule should be applied based on tags
+		if len(tags) > 0 {
+			shouldApply := false
+			for _, tag := range tags {
+				if tag == "all" || tag == rule.Name {
+					shouldApply = true
+					break
+				}
+			}
+			if !shouldApply {
+				continue
+			}
+		}
+
+		// Use ReplaceAllStringFunc to generate unique placeholders for each match
+		result = rule.Pattern.ReplaceAllStringFunc(result, func(match string) string {
+			placeholder := generatePlaceholder(match)
+
+			// Store the mapping in the vault if ctx is valid
+			if ctx != nil {
+				// Type assertion to access VaultStore method
+				type vaultContext interface {
+					VaultStore(placeholder, original string)
+				}
+				if vaultCtx, ok := ctx.(vaultContext); ok {
+					vaultCtx.VaultStore(placeholder, match)
+				}
+			}
+
+			return placeholder
+		})
+	}
+	return result
+}
+
+// Unmask restores placeholders back to their original secrets from the vault
+// It looks for the placeholder pattern: __AIGIS_SEC_[0-9a-f]{12}__
+func (s *Scanner) Unmask(ctx interface{}, input string) string {
+	if ctx == nil {
+		return input
+	}
+
+	// Type assertion to access VaultGet method
+	type vaultContext interface {
+		VaultGet(placeholder string) (string, bool)
+	}
+	vaultCtx, ok := ctx.(vaultContext)
+	if !ok {
+		return input
+	}
+
+	// Pattern to match our placeholders
+	placeholderPattern := regexp.MustCompile(`__AIGIS_SEC_[0-9a-f]{12}__`)
+
+	result := placeholderPattern.ReplaceAllStringFunc(input, func(placeholder string) string {
+		if original, found := vaultCtx.VaultGet(placeholder); found {
+			return original
+		}
+		return placeholder // Keep placeholder if not found in vault
+	})
+
+	return result
+}
+
 
 // AddRule 动态添加自定义规则
 func (s *Scanner) AddRule(name string, pattern string, replacement string) error {
