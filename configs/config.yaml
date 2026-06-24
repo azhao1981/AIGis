@@ -29,7 +29,7 @@ engine:
           config: {}  # Uses default patterns
     - id: "claude-proxy"
       matcher:
-        model: "^claude.*" 
+        model: "^(claude|glm).*"
       upstream:
         base_url: "env:AIGIS_ANTHROPIC_BASE_URL" # 或者你的中转地址
         path: "/messages"

@@ -1,7 +1,6 @@
 package providers
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -103,26 +102,32 @@ func (p *UniversalProvider) SendStream(ctx *core.AIGisContext, body []byte, orig
 		return p.handleHTTPError(resp.StatusCode, errBody)
 	}
 
-	// Step 3: Stream the SSE response line-by-line.
-	// ReadBytes('\n') preserves the original SSE framing (event:/data:/blank lines)
-	// better than bufio.Scanner, which strips the line delimiters.
-	reader := bufio.NewReader(resp.Body)
+	// Step 3: Stream the SSE response, restoring tokenized secrets. The
+	// StreamUnmasker handles placeholders split across multiple SSE text
+	// deltas (the common case, since the upstream emits one token at a time).
+	st := transform.NewStreamUnmasker(p.scanner, ctx)
+	buf := make([]byte, 4096)
 	for {
-		line, readErr := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			// Unmask placeholders back to original secrets in each chunk.
-			// Known limitation: a placeholder split across two SSE chunks would be
-			// missed; in practice secrets are masked on the request side and the
-			// assistant rarely echoes placeholders verbatim.
-			unmasked := p.scanner.Unmask(ctx, string(line))
-			if _, wErr := w.Write([]byte(unmasked)); wErr != nil {
-				return fmt.Errorf("failed to write stream: %w", wErr)
-			}
-			if flusher != nil {
-				flusher.Flush()
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			out, _ := st.Write(buf[:n])
+			if len(out) > 0 {
+				if _, wErr := w.Write(out); wErr != nil {
+					return fmt.Errorf("failed to write stream: %w", wErr)
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
 			}
 		}
 		if readErr != nil {
+			// Emit any buffered remainder before ending the stream.
+			if out, _ := st.Flush(); len(out) > 0 {
+				w.Write(out)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
 			if readErr == io.EOF {
 				return nil
 			}

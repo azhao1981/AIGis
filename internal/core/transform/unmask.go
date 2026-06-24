@@ -28,7 +28,7 @@ func (t *UnmaskTransform) Apply(ctx *core.AIGisContext, body []byte, _ map[strin
 
 	// 1. OpenAI format: choices[].message.content
 	choicesNode := root.Get("choices")
-	if err := choicesNode.Check(); err == nil && choicesNode.Type() == ast.V_ARRAY {
+	if err := choicesNode.Check(); err == nil && choicesNode.TypeSafe() == ast.V_ARRAY {
 		i := 0
 		for {
 			choiceNode := choicesNode.Index(i)
@@ -48,7 +48,7 @@ func (t *UnmaskTransform) Apply(ctx *core.AIGisContext, body []byte, _ map[strin
 				continue
 			}
 
-			if contentNode.Type() == ast.V_STRING {
+			if contentNode.TypeSafe() == ast.V_STRING {
 				if contentStr, err := contentNode.String(); err == nil {
 					unmasked := t.scanner.Unmask(ctx, contentStr)
 					if unmasked != contentStr {
@@ -62,7 +62,7 @@ func (t *UnmaskTransform) Apply(ctx *core.AIGisContext, body []byte, _ map[strin
 
 	// 2. Claude format: content[].text (array of blocks)
 	contentNode := root.Get("content")
-	if err := contentNode.Check(); err == nil && contentNode.Type() == ast.V_ARRAY {
+	if err := contentNode.Check(); err == nil && contentNode.TypeSafe() == ast.V_ARRAY {
 		i := 0
 		for {
 			blockNode := contentNode.Index(i)

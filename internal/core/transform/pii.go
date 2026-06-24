@@ -45,7 +45,7 @@ func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte) ([]byte,
 	if err := messagesNode.Check(); err != nil {
 		return body, nil
 	}
-	if messagesNode.Type() != ast.V_ARRAY {
+	if messagesNode.TypeSafe() != ast.V_ARRAY {
 		return body, nil
 	}
 
@@ -61,7 +61,7 @@ func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte) ([]byte,
 			i++
 			continue
 		}
-		if contentNode.Type() != ast.V_STRING {
+		if contentNode.TypeSafe() != ast.V_STRING {
 			i++
 			continue
 		}
@@ -96,7 +96,7 @@ func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte) ([]byte,
 
 	// 1. Top-level "system" field (if present and a string)
 	systemNode := root.Get("system")
-	if err := systemNode.Check(); err == nil && systemNode.Type() == ast.V_STRING {
+	if err := systemNode.Check(); err == nil && systemNode.TypeSafe() == ast.V_STRING {
 		if systemStr, err := systemNode.String(); err == nil {
 			redactedSystem := redact(systemStr)
 			if redactedSystem != systemStr {
@@ -110,7 +110,7 @@ func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte) ([]byte,
 	if err := messagesNode.Check(); err != nil {
 		return root.MarshalJSON()
 	}
-	if messagesNode.Type() != ast.V_ARRAY {
+	if messagesNode.TypeSafe() != ast.V_ARRAY {
 		return root.MarshalJSON()
 	}
 
@@ -127,7 +127,7 @@ func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte) ([]byte,
 			continue
 		}
 
-		if contentNode.Type() == ast.V_STRING {
+		if contentNode.TypeSafe() == ast.V_STRING {
 			// Simple string content
 			if contentStr, err := contentNode.String(); err == nil {
 				redactedContent := redact(contentStr)
@@ -135,7 +135,7 @@ func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte) ([]byte,
 					msgNode.Set("content", ast.NewString(redactedContent))
 				}
 			}
-		} else if contentNode.Type() == ast.V_ARRAY {
+		} else if contentNode.TypeSafe() == ast.V_ARRAY {
 			// Array of typed blocks (Claude format): redact text blocks
 			blockIdx := 0
 			for {

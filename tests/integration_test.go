@@ -3,9 +3,12 @@ package tests
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -15,12 +18,7 @@ import (
 	"aigis/internal/server"
 )
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+var placeholderRe = regexp.MustCompile(`__AIGIS_SEC_[0-9a-f]{12}__`)
 
 func TestMain(m *testing.M) {
 	config.Init("")
@@ -28,7 +26,7 @@ func TestMain(m *testing.M) {
 }
 
 func newTestServer() *httptest.Server {
-	log, _ := logger.New("info")
+	log, _ := logger.New("error")
 	srv, err := server.NewHTTPServer(":0", log)
 	if err != nil {
 		panic(err)
@@ -84,27 +82,49 @@ func TestChatCompletionsMethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestChatCompletions(t *testing.T) {
-	apiKey := viper.GetString("openai.api_key")
-	if apiKey == "" {
-		// Debug: 打印所有 openai 相关配置
-		t.Logf("openai.api_key: '%s'", viper.GetString("openai.api_key"))
-		t.Logf("openai.base_url: '%s'", viper.GetString("openai.base_url"))
-		t.Skip("跳过: 未设置 OPENAI_API_KEY")
-	}
-	t.Logf("Using API key: %s...", apiKey[:min(10, len(apiKey))])
+// TestChatCompletionsPIIRoundTrip verifies the non-streaming PII pipeline
+// end-to-end against a mock upstream (no real network / cwd dependency):
+// request PII is masked before reaching upstream, and the response is unmasked
+// back to the client.
+func TestChatCompletionsPIIRoundTrip(t *testing.T) {
+	// Mock upstream echoes the (already-masked) content back in OpenAI format.
+	var gotUpstreamBody string
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotUpstreamBody = string(b)
+		placeholder := placeholderRe.FindString(gotUpstreamBody)
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"role": "assistant", "content": "你给的是 " + placeholder}},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer mock.Close()
+
+	viper.Set("engine.routes", []map[string]any{
+		{
+			"id":      "test-openai",
+			"matcher": map[string]string{"model": "^gpt-.*"},
+			"upstream": map[string]any{
+				"base_url":      mock.URL,
+				"path":          "/chat/completions",
+				"auth_strategy": "none",
+			},
+			"transforms": []map[string]any{{"type": "pii", "config": map[string]string{}}},
+		},
+	})
+	defer viper.Set("engine.routes", nil)
 
 	ts := newTestServer()
 	defer ts.Close()
 
-	// Test message with PII
-	testContent := "检查话里有没有敏感信息，没有或已经脱敏就原话返回： My email is dangerous@coder.com and my phone is 13800138000"
-	t.Logf("Testing PII redaction with content: %s", testContent)
-
+	const email = "dangerous@coder.com"
 	body, _ := json.Marshal(map[string]any{
 		"model": "gpt-4o-mini",
 		"messages": []map[string]string{
-			{"role": "user", "content": testContent},
+			{"role": "user", "content": "My email is " + email + " and my phone is 13800138000"},
 		},
 	})
 
@@ -120,24 +140,22 @@ func TestChatCompletions(t *testing.T) {
 		t.Fatalf("期望状态 200，得到 %d: %s", resp.StatusCode, buf.String())
 	}
 
-	// Read and log the response
-	var response map[string]interface{}
-	err = json.NewDecoder(resp.Body).Decode(&response)
-	if err != nil {
-		t.Fatalf("解析响应失败: %v", err)
+	// 1. Upstream must have received masked content (no raw PII).
+	if strings.Contains(gotUpstreamBody, email) {
+		t.Errorf("上游收到了未脱敏的邮箱: %s", gotUpstreamBody)
+	}
+	if !placeholderRe.MatchString(gotUpstreamBody) {
+		t.Errorf("上游请求中未见占位符（PII 未脱敏）: %s", gotUpstreamBody)
 	}
 
-	// Log the full response for debugging
-	t.Logf("Response: %+v", response)
-
-	// Check if the response has choices
-	if choices, ok := response["choices"].([]interface{}); ok && len(choices) > 0 {
-		if choice, ok := choices[0].(map[string]interface{}); ok {
-			if message, ok := choice["message"].(map[string]interface{}); ok {
-				if content, ok := message["content"].(string); ok {
-					t.Logf("Response content: %s", content)
-				}
-			}
-		}
+	// 2. Response to client must be unmasked back to the original email.
+	var out map[string]any
+	json.NewDecoder(resp.Body).Decode(&out)
+	content := out["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string)
+	if !strings.Contains(content, email) {
+		t.Errorf("响应未还原原始邮箱: %s", content)
+	}
+	if placeholderRe.MatchString(content) {
+		t.Errorf("响应中占位符未还原: %s", content)
 	}
 }

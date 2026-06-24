@@ -1,6 +1,6 @@
 .agent-teams/
 .lead-sessions.json
-
+tmp
 .env
 .envrc
 log
