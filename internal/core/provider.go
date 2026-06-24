@@ -1,7 +1,7 @@
 package core
 
 import (
-	"context"
+	"io"
 	"net/http"
 )
 
@@ -11,6 +11,6 @@ type Provider interface {
 	ID() string
 	// Send sends a raw request body with original headers and returns the raw response body
 	Send(ctx *AIGisContext, body []byte, originalHeaders http.Header) ([]byte, error)
-	// Stream sends a request and returns a channel for streaming chunks
-	Stream(ctx context.Context, body []byte, originalHeaders http.Header) (<-chan []byte, error)
+	// SendStream streams the upstream SSE response through to w, flushing after each chunk
+	SendStream(ctx *AIGisContext, body []byte, originalHeaders http.Header, w io.Writer, flusher http.Flusher) error
 }

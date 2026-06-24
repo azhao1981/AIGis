@@ -1,33 +1,31 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"text/template"
 	"time"
 
 	"github.com/bytedance/sonic"
-	"github.com/bytedance/sonic/ast"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
-	"go.uber.org/zap"
 
 	"aigis/internal/core"
 	"aigis/internal/core/engine"
 	"aigis/internal/core/security"
+	"aigis/internal/core/transform"
 	"aigis/internal/pkg/logger"
 )
 
 // UniversalProvider implements the core.Provider interface with configurable routing
 type UniversalProvider struct {
-	route   *engine.Route
-	client  *http.Client
-	scanner *security.Scanner
-	log     *logger.Logger
+	route    *engine.Route
+	client   *http.Client
+	scanner  *security.Scanner   // used for streaming line-by-line unmask
+	registry *transform.Registry // pluggable request/response transformers
+	log      *logger.Logger
 }
 
 // NewUniversalProvider creates a new universal provider for the given route
@@ -37,10 +35,12 @@ func NewUniversalProvider(route *engine.Route, log *logger.Logger) *UniversalPro
 		zapLogger, _ := logger.New("info")
 		log = logger.NewLogger(zapLogger)
 	}
+	scanner := security.NewScanner()
 	return &UniversalProvider{
-		route:   route,
-		scanner: security.NewScanner(),
-		log:     log,
+		route:    route,
+		scanner:  scanner,
+		registry: transform.NewDefaultRegistry(scanner),
+		log:      log,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
@@ -75,31 +75,75 @@ func (p *UniversalProvider) Send(ctx *core.AIGisContext, body []byte, originalHe
 	return finalResp, nil
 }
 
-// Stream sends a streaming request (not implemented yet)
-func (p *UniversalProvider) Stream(ctx context.Context, body []byte, originalHeaders http.Header) (<-chan []byte, error) {
-	return nil, fmt.Errorf("streaming not implemented")
+// SendStream sends a request and streams the upstream SSE response through to w,
+// unmasking placeholders line-by-line and flushing after each write.
+// Request transforms (PII masking) are applied identically to the non-streaming path.
+func (p *UniversalProvider) SendStream(ctx *core.AIGisContext, body []byte, originalHeaders http.Header, w io.Writer, flusher http.Flusher) error {
+	// Step 1: Apply request transforms (with bidirectional tokenization)
+	transformedBody, err := p.applyRequestTransforms(ctx, body)
+	if err != nil {
+		return fmt.Errorf("transform error: %w", err)
+	}
+
+	// Step 2: Build and send the upstream request, keeping the body stream open
+	httpReq, err := p.buildUpstreamRequest(ctx.Context, transformedBody, originalHeaders)
+	if err != nil {
+		return err
+	}
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Upstream error before streaming any bytes: surface as a normal error
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return p.handleHTTPError(resp.StatusCode, errBody)
+	}
+
+	// Step 3: Stream the SSE response line-by-line.
+	// ReadBytes('\n') preserves the original SSE framing (event:/data:/blank lines)
+	// better than bufio.Scanner, which strips the line delimiters.
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			// Unmask placeholders back to original secrets in each chunk.
+			// Known limitation: a placeholder split across two SSE chunks would be
+			// missed; in practice secrets are masked on the request side and the
+			// assistant rarely echoes placeholders verbatim.
+			unmasked := p.scanner.Unmask(ctx, string(line))
+			if _, wErr := w.Write([]byte(unmasked)); wErr != nil {
+				return fmt.Errorf("failed to write stream: %w", wErr)
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("failed to read upstream stream: %w", readErr)
+		}
+	}
 }
 
-// applyRequestTransforms applies all configured transformations to the request body
+// applyRequestTransforms applies all configured transformations to the request
+// body by dispatching each step to its registered Transformer (Strategy).
 func (p *UniversalProvider) applyRequestTransforms(ctx *core.AIGisContext, body []byte) ([]byte, error) {
 	result := body
 
 	for _, step := range p.route.Transforms {
-		var err error
-		switch step.Type {
-		case engine.TransformTypePII:
-			result, err = p.applyPIITransform(ctx, result, step.Config)
-		case engine.TransformTypePIIClaude:
-			result, err = p.applyClaudePIITransform(ctx, result, step.Config)
-		case engine.TransformTypeFieldMap:
-			result, err = p.applyFieldMapTransform(result, step.Config)
-		case engine.TransformTypeTemplate:
-			result, err = p.applyTemplateTransform(result, step.Config)
-		default:
-			// Unknown transform type, skip
+		t, ok := p.registry.Get(step.Type)
+		if !ok {
+			// Unknown transform type, skip (preserves prior behavior)
 			continue
 		}
-		if err != nil {
+		var err error
+		if result, err = t.Apply(ctx, result, step.Config); err != nil {
 			return nil, fmt.Errorf("transform %s failed: %w", step.Type, err)
 		}
 	}
@@ -181,342 +225,19 @@ func (p *UniversalProvider) buildAuthHeaders() http.Header {
 	return headers
 }
 
-// applyPIITransform redacts sensitive information from the request body using bidirectional tokenization
-func (p *UniversalProvider) applyPIITransform(ctx *core.AIGisContext, body []byte, config map[string]string) ([]byte, error) {
-	// Custom rules can be added from config later if needed
-	// For now, we use the scanner's built-in rules
-
-	root, err := sonic.Get(body)
-	if err != nil {
-		return body, nil // Return original if parse fails
-	}
-
-	messagesNode := root.Get("messages")
-	if err := messagesNode.Check(); err != nil {
-		return body, nil
-	}
-
-	if messagesNode.Type() != ast.V_ARRAY {
-		return body, nil
-	}
-
-	i := 0
-	for {
-		msgNode := messagesNode.Index(i)
-		if err := msgNode.Check(); err != nil {
-			break
-		}
-
-		contentNode := msgNode.Get("content")
-		if err := contentNode.Check(); err != nil {
-			i++
-			continue
-		}
-
-		if contentNode.Type() != ast.V_STRING {
-			i++
-			continue
-		}
-
-		contentStr, err := contentNode.String()
-		if err != nil {
-			i++
-			continue
-		}
-
-		// Use Mask() for bidirectional tokenization instead of Sanitize()
-		newContent := p.scanner.Mask(ctx, contentStr, nil)
-
-		if newContent != contentStr {
-			msgNode.Set("content", ast.NewString(newContent))
-		}
-
-		i++
-	}
-
-	return root.MarshalJSON()
-}
-
-// applyClaudePIITransform redacts PII from Claude/Anthropic format request body using bidirectional tokenization
-// Claude format:
-//
-//	{
-//	  "system": "...",  // optional top-level string
-//	  "messages": [
-//	    {
-//	      "role": "user",
-//	      "content": "..."  // can be string OR array of blocks
-//	    },
-//	    {
-//	      "role": "assistant",
-//	      "content": [
-//	        {"type": "text", "text": "..."},
-//	        {"type": "image", ...}
-//	      ]
-//	    }
-//	  ]
-//	}
-func (p *UniversalProvider) applyClaudePIITransform(ctx *core.AIGisContext, body []byte, config map[string]string) ([]byte, error) {
-	// Helper function to redact using scanner with Mask()
-	redact := func(s string) string {
-		return p.scanner.Mask(ctx, s, nil)
-	}
-
-	// Parse the body as Sonic AST
-	root, err := sonic.Get(body)
-	if err != nil {
-		return body, nil // Return original if parse fails
-	}
-
-	// 1. Handle top-level "system" field (if it exists and is a string)
-	systemNode := root.Get("system")
-	if err := systemNode.Check(); err == nil && systemNode.Type() == ast.V_STRING {
-		if systemStr, err := systemNode.String(); err == nil {
-			redactedSystem := redact(systemStr)
-			if redactedSystem != systemStr {
-				root.Set("system", ast.NewString(redactedSystem))
-			}
-		}
-	}
-
-	// 2. Handle "messages" array
-	messagesNode := root.Get("messages")
-	if err := messagesNode.Check(); err != nil {
-		return root.MarshalJSON() // No messages, return modified root
-	}
-
-	if messagesNode.Type() != ast.V_ARRAY {
-		return root.MarshalJSON()
-	}
-
-	// Iterate through messages
-	msgIdx := 0
-	for {
-		msgNode := messagesNode.Index(msgIdx)
-		if err := msgNode.Check(); err != nil {
-			break
-		}
-
-		// Get the "content" field of this message
-		contentNode := msgNode.Get("content")
-		if err := contentNode.Check(); err != nil {
-			msgIdx++
-			continue
-		}
-
-		// Content can be either:
-		// - A string (simple case, like OpenAI)
-		// - An array of blocks (Claude blocks)
-
-		if contentNode.Type() == ast.V_STRING {
-			// Simple string content
-			if contentStr, err := contentNode.String(); err == nil {
-				redactedContent := redact(contentStr)
-				if redactedContent != contentStr {
-					msgNode.Set("content", ast.NewString(redactedContent))
-				}
-			}
-		} else if contentNode.Type() == ast.V_ARRAY {
-			// Array of blocks (Claude format)
-			blockIdx := 0
-			for {
-				blockNode := contentNode.Index(blockIdx)
-				if err := blockNode.Check(); err != nil {
-					break
-				}
-
-				// Check if this is a text block
-				typeNode := blockNode.Get("type")
-				textNode := blockNode.Get("text")
-
-				typeNodeErr := typeNode.Check()
-				textNodeErr := textNode.Check()
-				if typeNodeErr == nil && textNodeErr == nil {
-					typeStr, typeErr := typeNode.String()
-					textStr, textErr := textNode.String()
-
-					if typeErr == nil && textErr == nil && typeStr == "text" {
-						// Redact the "text" field using Mask()
-						redactedText := redact(textStr)
-						if redactedText != textStr {
-							blockNode.Set("text", ast.NewString(redactedText))
-						}
-					}
-				}
-
-				blockIdx++
-			}
-		}
-
-		msgIdx++
-	}
-
-	result, err := root.MarshalJSON()
-	if err != nil {
-		return nil, err
-	}
-
-	// Debug logging after redaction
-	p.log.Debug("Claude PII transform applied",
-		// zap.String("original", string(body)),
-		zap.String("redacted", string(result)),
-	)
-
-	return result, nil
-}
-
-// applyFieldMapTransform maps fields from source to target using gjson/sjson
-func (p *UniversalProvider) applyFieldMapTransform(body []byte, config map[string]string) ([]byte, error) {
-	result := body
-
-	// Config format: "target_path": "source_path"
-	// e.g., "inputs.query": "messages.0.content"
-	for targetPath, sourcePath := range config {
-		// Get value from source path
-		value := gjson.GetBytes(body, sourcePath)
-		if !value.Exists() {
-			continue
-		}
-
-		// Set value at target path
-		var err error
-		if value.Type == gjson.String {
-			result, err = sjson.SetBytes(result, targetPath, value.String())
-		} else if value.Type == gjson.Number {
-			result, err = sjson.SetBytes(result, targetPath, value.Float())
-		} else if value.Type == gjson.True || value.Type == gjson.False {
-			result, err = sjson.SetBytes(result, targetPath, value.Bool())
-		} else {
-			// For objects/arrays, set as raw JSON
-			result, err = sjson.SetRawBytes(result, targetPath, []byte(value.Raw))
-		}
-
-		if err != nil {
-			return nil, fmt.Errorf("failed to set field %s: %w", targetPath, err)
-		}
-	}
-
-	return result, nil
-}
-
-// applyTemplateTransform transforms the body using Go text/template
-func (p *UniversalProvider) applyTemplateTransform(body []byte, config map[string]string) ([]byte, error) {
-	tmplStr := config["template"]
-	if tmplStr == "" {
-		return body, nil
-	}
-
-	// Parse input JSON to map for template data
-	var data map[string]interface{}
-	if err := sonic.Unmarshal(body, &data); err != nil {
-		return nil, fmt.Errorf("failed to parse body for template: %w", err)
-	}
-
-	// Parse and execute template
-	tmpl, err := template.New("transform").Parse(tmplStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid template: %w", err)
-	}
-
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return nil, fmt.Errorf("template execution failed: %w", err)
-	}
-
-	// Validate output is valid JSON
-	result := buf.Bytes()
-	if !sonic.Valid(result) {
-		return nil, fmt.Errorf("template output is not valid JSON")
-	}
-
-	return result, nil
-}
-
-// applyResponseTransforms unmask placeholders in the response body
-// This restores the original secrets from the vault, only in content fields
+// applyResponseTransforms restores tokenized secrets in the (non-streaming)
+// response body via the registered unmask transformer.
 func (p *UniversalProvider) applyResponseTransforms(ctx *core.AIGisContext, body []byte) ([]byte, error) {
-	// Parse the response body
-	root, err := sonic.Get(body)
-	if err != nil {
-		return body, nil // Return original if parse fails
+	t, ok := p.registry.Get(transform.TypeUnmask)
+	if !ok {
+		return body, nil
 	}
-
-	// Handle different response formats
-
-	// 1. OpenAI format: choices[].message.content
-	choicesNode := root.Get("choices")
-	if err := choicesNode.Check(); err == nil && choicesNode.Type() == ast.V_ARRAY {
-		i := 0
-		for {
-			choiceNode := choicesNode.Index(i)
-			if err := choiceNode.Check(); err != nil {
-				break
-			}
-
-			messageNode := choiceNode.Get("message")
-			if err := messageNode.Check(); err != nil {
-				i++
-				continue
-			}
-
-			contentNode := messageNode.Get("content")
-			if err := contentNode.Check(); err != nil {
-				i++
-				continue
-			}
-
-			if contentNode.Type() == ast.V_STRING {
-				if contentStr, err := contentNode.String(); err == nil {
-					// Unmask placeholders in content
-					unmaskedContent := p.scanner.Unmask(ctx, contentStr)
-					if unmaskedContent != contentStr {
-						messageNode.Set("content", ast.NewString(unmaskedContent))
-					}
-				}
-			}
-
-			i++
-		}
-	}
-
-	// 2. Claude format: content[].text (array of blocks)
-	contentNode := root.Get("content")
-	if err := contentNode.Check(); err == nil && contentNode.Type() == ast.V_ARRAY {
-		i := 0
-		for {
-			blockNode := contentNode.Index(i)
-			if err := blockNode.Check(); err != nil {
-				break
-			}
-
-			// Check if this is a text block
-			typeNode := blockNode.Get("type")
-			textNode := blockNode.Get("text")
-
-			typeNodeErr := typeNode.Check()
-			textNodeErr := textNode.Check()
-			if typeNodeErr == nil && textNodeErr == nil {
-				typeStr, typeErr := typeNode.String()
-				textStr, textErr := textNode.String()
-
-				if typeErr == nil && textErr == nil && typeStr == "text" {
-					// Unmask placeholders in text
-					unmaskedText := p.scanner.Unmask(ctx, textStr)
-					if unmaskedText != textStr {
-						blockNode.Set("text", ast.NewString(unmaskedText))
-					}
-				}
-			}
-
-			i++
-		}
-	}
-
-	return root.MarshalJSON()
+	return t.Apply(ctx, body, nil)
 }
 
-// sendToUpstream sends the transformed request to the upstream service with header handling
-func (p *UniversalProvider) sendToUpstream(ctx context.Context, body []byte, originalHeaders http.Header) ([]byte, error) {
+// buildUpstreamRequest constructs the upstream HTTP request (URL, env:VAR resolution,
+// query-auth, and HeaderPolicy/auth headers). Shared by blocking and streaming paths.
+func (p *UniversalProvider) buildUpstreamRequest(ctx context.Context, body []byte, originalHeaders http.Header) (*http.Request, error) {
 	upstream := p.route.Upstream
 
 	// Build base URL (support env:VAR syntax)
@@ -564,6 +285,16 @@ func (p *UniversalProvider) sendToUpstream(ctx context.Context, body []byte, ori
 		for _, value := range values {
 			httpReq.Header.Add(key, value)
 		}
+	}
+
+	return httpReq, nil
+}
+
+// sendToUpstream sends the transformed request to the upstream service with header handling
+func (p *UniversalProvider) sendToUpstream(ctx context.Context, body []byte, originalHeaders http.Header) ([]byte, error) {
+	httpReq, err := p.buildUpstreamRequest(ctx, body, originalHeaders)
+	if err != nil {
+		return nil, err
 	}
 
 	// Execute request

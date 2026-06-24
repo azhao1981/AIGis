@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 
 	"aigis/internal/config"
@@ -91,8 +92,12 @@ func (s *HTTPServer) setupRoutes() *http.ServeMux {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// Gateway endpoint for LLM requests
-	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
+	// Gateway endpoints for LLM requests.
+	// Both share one handler; the engine routes by model regardless of inbound path.
+	// /v1/chat/completions: OpenAI-compatible clients
+	// /v1/messages: Anthropic-native clients (e.g. Claude Code via ANTHROPIC_BASE_URL)
+	mux.HandleFunc("/v1/chat/completions", s.handleGateway)
+	mux.HandleFunc("/v1/messages", s.handleGateway)
 
 	// Root endpoint
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -138,16 +143,15 @@ func (s *HTTPServer) Start() error {
 	return s.server.Shutdown(ctx)
 }
 
-// handleChatCompletions processes LLM requests through the engine
-func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+// handleGateway processes LLM requests through the engine.
+// Serves both /v1/chat/completions (OpenAI) and /v1/messages (Anthropic);
+// routing is decided by the engine from the request body's model field.
+func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	// Only accept POST requests
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	// Set content type
-	w.Header().Set("Content-Type", "application/json")
 
 	// Read the raw body into []byte
 	body, err := io.ReadAll(r.Body)
@@ -201,6 +205,28 @@ func (s *HTTPServer) handleChatCompletions(w http.ResponseWriter, r *http.Reques
 
 	// Create universal provider for this route
 	provider := providers.NewUniversalProvider(route, reqLogger)
+
+	// Branch on streaming: clients set "stream": true to request SSE.
+	// The flusher must be available to stream; otherwise fall back to blocking.
+	isStream := gjson.GetBytes(processedBody, "stream").Bool()
+	if flusher, ok := w.(http.Flusher); isStream && ok {
+		// SSE response headers
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		// Stream upstream SSE through, unmasking placeholders per chunk.
+		// Pass the AIGisContext (ctx) for bidirectional tokenization (vault).
+		if err := provider.SendStream(ctx, processedBody, r.Header, w, flusher); err != nil {
+			// If nothing has been written yet the status is still settable; otherwise
+			// the error is logged and the stream simply ends.
+			reqLogger.Error("Provider stream error", zap.Error(err))
+		}
+		return
+	}
+
+	// Non-streaming path
+	w.Header().Set("Content-Type", "application/json")
 
 	// Send request through provider (includes transforms and header handling)
 	// Pass the AIGisContext (ctx) instead of r.Context() for bidirectional tokenization

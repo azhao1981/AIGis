@@ -58,10 +58,5 @@ const (
 	AuthStrategyQuery  = "query"  // Query parameter with token value
 )
 
-// TransformType constants
-const (
-	TransformTypePII      = "pii"       // PII redaction (OpenAI format)
-	TransformTypePIIClaude = "pii_claude" // PII redaction (Claude/Anthropic format)
-	TransformTypeFieldMap = "field_map" // Field mapping using gjson/sjson
-	TransformTypeTemplate = "template"  // Go text/template transformation
-)
+// TransformType constants are owned by the transform package alongside their
+// implementations (internal/core/transform).
