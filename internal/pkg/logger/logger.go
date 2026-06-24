@@ -2,11 +2,17 @@ package logger
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
+
+// logFile is the on-disk log path. Logs are written here in addition to stdout
+// so they persist across restarts. NOTE: no rotation yet — for long-running
+// deployments add a lumberjack roller to bound file growth.
+const logFile = "./logs/aigis.log"
 
 // New 创建一个新的 zap logger实例
 // level: 日志级别 (debug, info, warn, error)
@@ -37,9 +43,13 @@ func NewWithCallerSkip(level string, skip int) (*zap.Logger, error) {
 		config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 	}
 
-	// 配置输出到 stdout
-	config.OutputPaths = []string{"stdout"}
-	config.ErrorOutputPaths = []string{"stderr"}
+	// 配置输出：同时写 stdout（实时调试/容器）和落盘文件（持久化）
+	// 确保日志目录存在，zap 不会自动创建目录
+	if err := os.MkdirAll("./logs", 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create logs dir: %w", err)
+	}
+	config.OutputPaths = []string{"stdout", logFile}
+	config.ErrorOutputPaths = []string{"stderr", logFile}
 
 	// 自定义时间格式
 	config.EncoderConfig.TimeKey = "timestamp"
