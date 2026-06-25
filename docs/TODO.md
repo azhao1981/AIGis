@@ -8,7 +8,7 @@
 
 NEXT：
 1. 记录 敏感信息  ✅ 已完成（2026-06-26）
-2. 并发监控
+2. 并发监控  ✅ 已完成（2026-06-26）
 3. 消息回溯（往回替换）  ✅ 已完成
 
 ---
@@ -55,3 +55,10 @@ NEXT：
 - fail-loud：`Auditor` 注入 zap logger，marshal/write 失败 `log.Error` 带 request_id（不崩主请求但响亮留痕）
 - 代码评审处置见 `docs/CODE_REVIEW_audit_feature_2026-06-26.md`
 - 验证：单测（audit 5 用例 + maskPreview 表驱动）+ 真实 GLM 上游端到端（三类密钥脱敏、权限 600、无明文泄漏均实测确认）
+
+### NEXT#2 并发监控（2026-06-26）
+- 新增 `internal/core/metrics` 包：`sync/atomic` 无锁计数 in_flight / peak_concurrency / total / success / failed + uptime（监控，**不限流** YAGNI）
+- `handleGateway` 入口 `metrics.Begin()` + `defer End(succeeded)`，覆盖在途全生命周期；流式/非流式成功路径置 `succeeded=true`，早返回错误路径默认 failed
+- 新增 `GET /metrics` 端点返回 JSON snapshot
+- **踩坑修复**：成功判定变量原名 `ok`，被 `if flusher, ok := w.(http.Flusher)` 的 `:=` 遮蔽，导致流式成功被误记 failed；改名 `succeeded` 解决（实测 success=0→正确计数）
+- 验证：`go test -race` 并发单测（1000 goroutine，in_flight 归零、total/peak 正确）+ 真实 GLM 端到端（峰值在途 3、success/failed 分别计、非 POST 不计数均实测确认）

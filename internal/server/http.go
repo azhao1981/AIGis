@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"aigis/internal/core"
 	"aigis/internal/core/audit"
 	"aigis/internal/core/engine"
+	"aigis/internal/core/metrics"
 	"aigis/internal/core/processors"
 	"aigis/internal/core/providers"
 	"aigis/internal/pkg/logger"
@@ -31,6 +33,7 @@ type HTTPServer struct {
 	mux      *http.ServeMux
 	logger   *logger.Logger
 	auditor  *audit.Auditor
+	metrics  *metrics.Metrics
 }
 
 // auditLogPath is the on-disk JSONL audit trail of masked sensitive info.
@@ -93,6 +96,7 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 		engine:   eng,
 		logger:   extLogger,
 		auditor:  auditor,
+		metrics:  metrics.New(),
 	}
 
 	// Initialize mux
@@ -110,6 +114,9 @@ func (s *HTTPServer) setupRoutes() *http.ServeMux {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
 	})
+
+	// Concurrency metrics endpoint: current in-flight, peak, and cumulative totals.
+	mux.HandleFunc("/metrics", s.handleMetrics)
 
 	// Gateway endpoints for LLM requests.
 	// Both share one handler; the engine routes by model regardless of inbound path.
@@ -175,6 +182,14 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Concurrency monitoring: count this request as in-flight for its whole
+	// lifetime. succeeded defaults to false so any early-return error path tallies
+	// as failed; the success paths flip it to true. (Named succeeded, not ok, to
+	// avoid shadowing by the `flusher, ok :=` type assertion below.)
+	s.metrics.Begin()
+	succeeded := false
+	defer func() { s.metrics.End(succeeded) }()
 
 	// Read the raw body into []byte
 	body, err := io.ReadAll(r.Body)
@@ -252,6 +267,8 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 			// If nothing has been written yet the status is still settable; otherwise
 			// the error is logged and the stream simply ends.
 			reqLogger.Error("Provider stream error", zap.Error(err))
+		} else {
+			succeeded = true
 		}
 		return
 	}
@@ -279,6 +296,16 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	// Return the processed response
 	w.WriteHeader(http.StatusOK)
 	w.Write(finalResp)
+	succeeded = true
+}
+
+// handleMetrics returns a JSON snapshot of concurrency counters for monitoring.
+func (s *HTTPServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	snap := s.metrics.Snapshot()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(snap); err != nil {
+		s.logger.Error("Failed to encode metrics", zap.Error(err))
+	}
 }
 
 // generateRequestID generates a simple request ID for tracking
