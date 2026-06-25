@@ -21,7 +21,29 @@ var serveCmd = &cobra.Command{
 			logLevel = "info"
 		}
 
-		globalLogger, err := logger.New(logLevel)
+		// 日志滚动配置（缺省走 logger.DefaultRotation：rotate 关闭 = 单文件，交给 logrotate）
+		// 仅当显式 log.rotate=true 时才启用内置 lumberjack 滚动。
+		rot := logger.DefaultRotation()
+		if viper.IsSet("log.rotate") {
+			rot.Enabled = viper.GetBool("log.rotate")
+		}
+		if v := viper.GetString("log.file"); v != "" {
+			rot.Filename = v
+		}
+		if viper.IsSet("log.max_size_mb") {
+			rot.MaxSizeMB = viper.GetInt("log.max_size_mb")
+		}
+		if viper.IsSet("log.max_backups") {
+			rot.MaxBackups = viper.GetInt("log.max_backups")
+		}
+		if viper.IsSet("log.max_age_days") {
+			rot.MaxAgeDays = viper.GetInt("log.max_age_days")
+		}
+		if viper.IsSet("log.compress") {
+			rot.Compress = viper.GetBool("log.compress")
+		}
+
+		globalLogger, err := logger.NewWithRotation(logLevel, rot)
 		if err != nil {
 			return fmt.Errorf("failed to initialize logger: %w", err)
 		}

@@ -106,6 +106,33 @@ func TestTemplateTransform(t *testing.T) {
 	}
 }
 
+// TestTemplateTransformDifyShape exercises the real dify-workflow template:
+// an OpenAI chat body is reshaped into Dify's /workflows/run payload. The
+// `json` func must escape content with embedded quotes/newlines so the output
+// stays valid JSON (the naive {{...}} interpolation would corrupt it).
+func TestTemplateTransformDifyShape(t *testing.T) {
+	tr := &TemplateTransform{}
+	body := `{"model":"dify-x","user":"u1","messages":[{"role":"user","content":"say \"hi\"\nthen bye"}]}`
+	config := map[string]string{
+		"template": `{"inputs":{"query":{{json (index .messages 0 "content")}}},"response_mode":"blocking","user":{{json .user}}}`,
+	}
+
+	out, err := tr.Apply(newCtx(), []byte(body), config)
+	if err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	if q := gjson.GetBytes(out, "inputs.query").String(); q != "say \"hi\"\nthen bye" {
+		t.Errorf("query not round-tripped through json escaping, got %q", q)
+	}
+	if u := gjson.GetBytes(out, "user").String(); u != "u1" {
+		t.Errorf("expected user=u1, got %q", u)
+	}
+	if rm := gjson.GetBytes(out, "response_mode").String(); rm != "blocking" {
+		t.Errorf("expected response_mode=blocking, got %q", rm)
+	}
+}
+
 func TestTemplateTransformInvalidJSONOutput(t *testing.T) {
 	tr := &TemplateTransform{}
 	config := map[string]string{"template": `not json {{.user}}`}

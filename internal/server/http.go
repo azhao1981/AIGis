@@ -22,6 +22,7 @@ import (
 	"aigis/internal/core/metrics"
 	"aigis/internal/core/processors"
 	"aigis/internal/core/providers"
+	"aigis/internal/core/transform"
 	"aigis/internal/pkg/logger"
 )
 
@@ -58,6 +59,12 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 	engineConfig, err := config.LoadEngineConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load engine config: %w", err)
+	}
+
+	// Validate config before building the engine so a bad config fails loud at
+	// startup instead of misrouting (or panicking) on a live request.
+	if err := engineConfig.Validate(transform.KnownTypes()); err != nil {
+		return nil, fmt.Errorf("invalid engine config: %w", err)
 	}
 
 	// Create transformation engine

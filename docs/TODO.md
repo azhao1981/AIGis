@@ -4,7 +4,7 @@
 
 
 
-问题2：provider 添加 openai dify cluade
+问题2：provider 添加 openai dify cluade  ✅ 已完成（2026-06-26，dify 路由打通，见下）
 
 NEXT：
 1. 记录 敏感信息  ✅ 已完成（2026-06-26）
@@ -12,6 +12,29 @@ NEXT：
 3. 消息回溯（往回替换）  ✅ 已完成
 
 ---
+
+## 已完成 (2026-06-26 下午) — 工程健壮性三件套
+
+### 1. 配置验证层
+- `EngineConfig.Validate(knownTransforms)`（`internal/core/engine/validate.go`）：路由非空、ID 唯一非空、matcher 正则合法、upstream base_url 非空、auth_strategy 合法（含 none/空）、transform 类型已知、必须存在 catch-all（空 matcher）路由
+- 在 `server.NewHTTPServer` 加载配置后、建 engine 前调用，**坏配置启动期即响亮报错**而非运行期误路由
+- transform 合法类型由 `transform.KnownTypes()` 注入，保持 engine 不反向依赖 transform 实现
+- 测试：`validate_test.go`（OK 用例 + 8 个失败模式表驱动 + none/空 auth）；修了 server/集成测试夹具补 catch-all
+
+### 2. dify / 多 provider 路由打通
+- `config.yaml` 启用 `dify-workflow` 路由（OpenAI chat → dify `/workflows/run`）
+- **template transform 加 `json` 函数**：JSON 转义 content，修复原模板 `{{...}}` 裸插值在内容含引号/换行时产出非法 JSON 的隐患
+- 实测：`dify-test` 模型 → `route_id: dify-workflow`，PII→模板→上游投递整条链路打通；上游因无 `DIFY_API_KEY` 返回 unauthorized（路由/转换已证实，差真实 key）
+- 现共 4 provider 路由：openai-default / claude-proxy / dify-workflow / fallback
+- 测试：`TestTemplateTransformDifyShape`（含引号/换行的 content 经 json 函数往返）
+
+### 3. 日志滚动切割（可选，默认关闭）
+- **opt-in**：`log.rotate` 默认 false = 单文件（交给系统 logrotate）；设 true 才启用内置 lumberjack。二者勿同管一文件（logrotate 重命名/truncate 会与 lumberjack 的 fd 冲突）
+- `logger.go` 按 `RotationConfig.Enabled` 二分：关闭走原 `zap.Config` 单文件实现（`buildStaticLogger`），启用走手工 lumberjack 双 core（`buildRotatingLogger`）。编码器格式经 `configureEncoder` 共享，两路一致
+- 接入 lumberjack（`gopkg.in/natefinch/lumberjack.v2`）；弃用全局 `RegisterSink`（一次性注册会锁死配置 + 不可测）
+- 配置化：`config.yaml` `log.{rotate,file,max_size_mb,max_backups,max_age_days,compress}`，serve.go 逐项 viper 覆盖 `logger.DefaultRotation`
+- 保留 funcCore（函数名字段）与 caller skip 行为（实测 caller 字段正确无回归）
+- 测试：`rotation_test.go` 临时目录隔离——启用时 MaxSize=1MB 强制滚动断言产生 backup；关闭时同等负载断言仅单文件不滚动
 
 ## 已完成 (2026-06-25)
 

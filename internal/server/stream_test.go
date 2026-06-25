@@ -64,6 +64,16 @@ func TestStreamUnmaskRoundTrip(t *testing.T) {
 				{"type": "pii", "config": map[string]string{}},
 			},
 		},
+		// Catch-all so the config passes engine validation; never matched here.
+		{
+			"id":      "fallback",
+			"matcher": map[string]any{},
+			"upstream": map[string]any{
+				"base_url":      mock.URL,
+				"path":          "/v1/chat/completions",
+				"auth_strategy": "none",
+			},
+		},
 	})
 	defer viper.Set("engine.routes", nil)
 

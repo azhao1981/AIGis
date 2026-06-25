@@ -13,9 +13,25 @@ import (
 // TemplateTransform reconstructs the body using a Go text/template, enabling
 // cross-provider protocol translation (e.g. OpenAI -> Dify). The rendered
 // output must be valid JSON. Config key "template" holds the template string.
+//
+// The template gets a "json" function that marshals any value to a JSON literal
+// (with surrounding quotes for strings). Use it for any field that carries
+// arbitrary user text — e.g. {"query": {{json (index .messages 0 "content")}}}
+// — so embedded quotes/newlines stay valid JSON instead of breaking the output.
 type TemplateTransform struct{}
 
 func (t *TemplateTransform) Name() string { return TypeTemplate }
+
+// templateFuncs are the helpers exposed to every template.
+var templateFuncs = template.FuncMap{
+	"json": func(v interface{}) (string, error) {
+		b, err := sonic.Marshal(v)
+		if err != nil {
+			return "", fmt.Errorf("json func: %w", err)
+		}
+		return string(b), nil
+	},
+}
 
 func (t *TemplateTransform) Apply(_ *core.AIGisContext, body []byte, config map[string]string) ([]byte, error) {
 	tmplStr := config["template"]
@@ -28,7 +44,7 @@ func (t *TemplateTransform) Apply(_ *core.AIGisContext, body []byte, config map[
 		return nil, fmt.Errorf("failed to parse body for template: %w", err)
 	}
 
-	tmpl, err := template.New("transform").Parse(tmplStr)
+	tmpl, err := template.New("transform").Funcs(templateFuncs).Parse(tmplStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid template: %w", err)
 	}

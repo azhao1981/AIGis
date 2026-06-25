@@ -31,6 +31,17 @@ func newGatewayServer(t *testing.T, upstreamURL string) *httptest.Server {
 				{"type": "pii", "config": map[string]string{}},
 			},
 		},
+		// Catch-all so the config passes engine validation (mirrors production
+		// convention). Tests only send test-* models, so it is never matched.
+		{
+			"id":      "fallback",
+			"matcher": map[string]any{},
+			"upstream": map[string]any{
+				"base_url":      upstreamURL,
+				"path":          "/v1/chat/completions",
+				"auth_strategy": "none",
+			},
+		},
 	})
 	t.Cleanup(func() { viper.Set("engine.routes", nil) })
 

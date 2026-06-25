@@ -4,6 +4,16 @@ server:
 
 log:
   level: "debug"
+  file: "./logs/aigis.log"
+  # 日志滚动：默认关闭（单文件），交给系统 logrotate 处理。
+  # 若不用 logrotate，设 rotate: true 启用内置 lumberjack 滚动。
+  # 切勿同时用 logrotate + lumberjack 管同一文件（会互相冲突）。
+  rotate: false
+  # 下列参数仅在 rotate: true 时生效：
+  max_size_mb: 100   # rotate when the file exceeds this size
+  max_backups: 7     # keep at most this many rotated files
+  max_age_days: 30   # delete rotated files older than this
+  compress: true     # gzip rotated files
 
 # Sensitive-info audit trail.
 # When enabled, every request that masks sensitive info appends ONE metadata-only
@@ -53,28 +63,32 @@ engine:
       transforms:
         - type: "pii_claude"
           config: {}
-    # Example: Dify route (commented out)
-    # - id: "dify-workflow"
-    #   matcher:
-    #     model: "^dify-.*"
-    #   upstream:
-    #     base_url: "https://api.dify.ai/v1"
-    #     path: "/workflows/run"
-    #     auth_strategy: "bearer"
-    #     token_env: "DIFY_API_KEY"
-    #   transforms:
-    #     - type: "pii"
-    #       config: {}
-    #     - type: "template"
-    #       config:
-    #         template: |
-    #           {
-    #             "inputs": {
-    #               "query": "{{index .messages 0 "content"}}"
-    #             },
-    #             "response_mode": "blocking",
-    #             "user": "{{.user}}"
-    #           }
+    # Dify workflow route: translates an OpenAI-style chat request into Dify's
+    # /workflows/run payload. PII is masked first, then the body is reshaped by
+    # the template. Requires DIFY_API_KEY in the environment.
+    # NOTE: the `json` template func quotes+escapes the value, so do NOT wrap the
+    # {{json ...}} call in literal quotes — it already emits a JSON string.
+    - id: "dify-workflow"
+      matcher:
+        model: "^dify-.*"
+      upstream:
+        base_url: "https://api.dify.ai/v1"
+        path: "/workflows/run"
+        auth_strategy: "bearer"
+        token_env: "DIFY_API_KEY"
+      transforms:
+        - type: "pii"
+          config: {}
+        - type: "template"
+          config:
+            template: |
+              {
+                "inputs": {
+                  "query": {{json (index .messages 0 "content")}}
+                },
+                "response_mode": "blocking",
+                "user": {{json .user}}
+              }
 
     # Example: Field mapping transform (commented out)
     # - id: "custom-api"

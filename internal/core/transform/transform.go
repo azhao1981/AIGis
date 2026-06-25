@@ -54,6 +54,19 @@ func NewDefaultRegistry(scanner *security.Scanner) *Registry {
 	return r
 }
 
+// KnownTypes returns the set of transform type names the default registry
+// supports. It exists so config validation can reject unknown transform types
+// at startup without the engine package depending on these implementations.
+func KnownTypes() map[string]bool {
+	return map[string]bool{
+		TypePII:       true,
+		TypePIIClaude: true,
+		TypeFieldMap:  true,
+		TypeTemplate:  true,
+		TypeUnmask:    true,
+	}
+}
+
 // Register adds a transformer, keyed by its Name().
 func (r *Registry) Register(t Transformer) {
 	r.transformers[t.Name()] = t

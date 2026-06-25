@@ -20,8 +20,28 @@ import (
 
 var placeholderRe = regexp.MustCompile(`__AIGIS_SEC_[0-9a-f]{12}__`)
 
+// defaultTestRoutes is a minimal config that passes engine validation (a single
+// catch-all route). Tests that don't care about routing rely on it; tests that
+// set their own routes restore it on cleanup.
+func defaultTestRoutes() []map[string]any {
+	return []map[string]any{
+		{
+			"id":      "fallback",
+			"matcher": map[string]any{},
+			"upstream": map[string]any{
+				"base_url":      "http://unused.invalid",
+				"path":          "/chat/completions",
+				"auth_strategy": "none",
+			},
+		},
+	}
+}
+
 func TestMain(m *testing.M) {
 	config.Init("")
+	// Provide a valid default engine config so NewHTTPServer (which now validates
+	// config at startup) succeeds for tests that don't configure their own routes.
+	viper.Set("engine.routes", defaultTestRoutes())
 	os.Exit(m.Run())
 }
 
@@ -114,8 +134,18 @@ func TestChatCompletionsPIIRoundTrip(t *testing.T) {
 			},
 			"transforms": []map[string]any{{"type": "pii", "config": map[string]string{}}},
 		},
+		// Catch-all so the config passes engine validation; gpt-* hits the route above.
+		{
+			"id":      "fallback",
+			"matcher": map[string]any{},
+			"upstream": map[string]any{
+				"base_url":      mock.URL,
+				"path":          "/chat/completions",
+				"auth_strategy": "none",
+			},
+		},
 	})
-	defer viper.Set("engine.routes", nil)
+	defer viper.Set("engine.routes", defaultTestRoutes())
 
 	ts := newTestServer()
 	defer ts.Close()
