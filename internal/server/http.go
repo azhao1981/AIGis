@@ -16,6 +16,7 @@ import (
 
 	"aigis/internal/config"
 	"aigis/internal/core"
+	"aigis/internal/core/audit"
 	"aigis/internal/core/engine"
 	"aigis/internal/core/processors"
 	"aigis/internal/core/providers"
@@ -29,7 +30,13 @@ type HTTPServer struct {
 	engine   *engine.Engine
 	mux      *http.ServeMux
 	logger   *logger.Logger
+	auditor  *audit.Auditor
 }
+
+// auditLogPath is the on-disk JSONL audit trail of masked sensitive info.
+// Hardcoded like logger.logFile (path is not worth a config knob; the on/off
+// toggle lives in config `audit.enabled`).
+const auditLogPath = "./logs/audit.jsonl"
 
 // NewHTTPServer creates a new HTTP server with gateway capabilities
 func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
@@ -69,11 +76,23 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 		)
 	}
 
+	// Audit logger for masked sensitive info (JSONL; previews are partially masked).
+	auditEnabled := config.AuditEnabled()
+	auditor, err := audit.New(auditLogPath, auditEnabled, zapLogger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create auditor: %w", err)
+	}
+	extLogger.Info("Audit logger initialized",
+		zap.Bool("enabled", auditEnabled),
+		zap.String("path", auditLogPath),
+	)
+
 	s := &HTTPServer{
 		Server:   baseServer,
 		pipeline: pipeline,
 		engine:   eng,
 		logger:   extLogger,
+		auditor:  auditor,
 	}
 
 	// Initialize mux
@@ -137,6 +156,10 @@ func (s *HTTPServer) Start() error {
 	<-stop
 	s.logger.Skip(0).Info("Shutting down server...")
 
+	if err := s.auditor.Close(); err != nil {
+		s.logger.Error("Failed to close auditor", zap.Error(err))
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -176,6 +199,10 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	ctx.RequestID = requestID
 	ctx.TraceID = traceID
 
+	// Audit masked sensitive info at request end (metadata only; no-op if nothing
+	// was masked). Covers both streaming and blocking paths via a single defer.
+	defer s.auditor.Record(ctx)
+
 	// Execute the pipeline for request logging
 	processedBody, err := s.pipeline.ExecuteRequest(ctx, body)
 	if err != nil {
@@ -202,6 +229,10 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		zap.String("route_id", route.ID),
 		zap.String("upstream", route.Upstream.BaseURL),
 	)
+
+	// Stash routing metadata for the audit record (read in the deferred Record).
+	ctx.SetMetadata("route_id", route.ID)
+	ctx.SetMetadata("model", gjson.GetBytes(processedBody, "model").String())
 
 	// Create universal provider for this route
 	provider := providers.NewUniversalProvider(route, reqLogger)

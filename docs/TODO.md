@@ -7,9 +7,9 @@
 问题2：provider 添加 openai dify cluade
 
 NEXT：
-1. 记录 敏感信息
+1. 记录 敏感信息  ✅ 已完成（2026-06-26）
 2. 并发监控
-3. 消息回溯（往回替换）
+3. 消息回溯（往回替换）  ✅ 已完成
 
 ---
 
@@ -45,3 +45,13 @@ NEXT：
 ### 日志落盘
 - `internal/pkg/logger/logger.go`：输出同时写 stdout 和 `./logs/aigis.log`（自动 `os.MkdirAll` 建目录），`logs/` 已在 `.gitignore`
 - 未做滚动切割（YAGNI）；常驻运行需再加 lumberjack 按大小/天数切割
+
+### NEXT#1 记录敏感信息 = 脱敏审计追踪（2026-06-26）
+- 新增 `internal/core/audit` 包：发生脱敏的请求向 `./logs/audit.jsonl` 追加一条 JSONL（`request_id/trace_id/timestamp/model/route_id/total/by_type/items/duration_ms`）
+- 采集解耦：`Scanner.Mask` 命中时独立断言 `RecordDetection(type, placeholder, preview)`，不动既有 `vaultContext` 接口（现有 Mask 单测零破坏）
+- 记录粒度：**仅元数据 + 部分打码预览**（`maskPreview` 首2尾2中间`***`，≤4位全码，如 `te***om`）；**不落完整明文**；干净请求不写
+- 写入时机：`handleGateway` 单个 `defer auditor.Record(ctx)` 统一覆盖流式/非流式
+- 配置：`config.yaml` `audit.enabled`（缺省 true）；文件权限 `0o600`（含 preview 部分明文+指纹，比 aigis.log 敏感）
+- fail-loud：`Auditor` 注入 zap logger，marshal/write 失败 `log.Error` 带 request_id（不崩主请求但响亮留痕）
+- 代码评审处置见 `docs/CODE_REVIEW_audit_feature_2026-06-26.md`
+- 验证：单测（audit 5 用例 + maskPreview 表驱动）+ 真实 GLM 上游端到端（三类密钥脱敏、权限 600、无明文泄漏均实测确认）

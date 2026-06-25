@@ -24,6 +24,21 @@ type AIGisContext struct {
 	// Map: "__AIGIS_SEC_a1b2c3d4e5f6__" -> "sk-real-key"
 	secretVault map[string]string
 	vaultMu     sync.RWMutex
+
+	// detections records metadata-only audit entries for sensitive info masked in
+	// this request (type + placeholder, never the plaintext). Written alongside the
+	// vault under vaultMu; consumed by the audit logger at request end.
+	detections []Detection
+}
+
+// Detection is a metadata record of one masked secret: the rule name that
+// matched (e.g. "OpenAI API Key"), the placeholder it was replaced with, and a
+// partially-masked Preview (e.g. "te***om") to help confirm what was hit.
+// Preview carries only first/last few chars — never the full plaintext.
+type Detection struct {
+	Type        string
+	Placeholder string
+	Preview     string
 }
 
 // NewGatewayContext creates a new GatewayContext
@@ -77,6 +92,23 @@ func (c *AIGisContext) VaultGet(placeholder string) (string, bool) {
 	defer c.vaultMu.RUnlock()
 	original, ok := c.secretVault[placeholder]
 	return original, ok
+}
+
+// RecordDetection appends an audit entry (thread-safe). Called from Scanner.Mask
+// alongside VaultStore; preview is a partially-masked hint, never full plaintext.
+func (c *AIGisContext) RecordDetection(ruleType, placeholder, preview string) {
+	c.vaultMu.Lock()
+	defer c.vaultMu.Unlock()
+	c.detections = append(c.detections, Detection{Type: ruleType, Placeholder: placeholder, Preview: preview})
+}
+
+// Detections returns a copy of all detection records for this request (thread-safe).
+func (c *AIGisContext) Detections() []Detection {
+	c.vaultMu.RLock()
+	defer c.vaultMu.RUnlock()
+	out := make([]Detection, len(c.detections))
+	copy(out, c.detections)
+	return out
 }
 
 // VaultGetAll returns a copy of all vault mappings (thread-safe)

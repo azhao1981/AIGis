@@ -5,6 +5,13 @@ server:
 log:
   level: "debug"
 
+# Sensitive-info audit trail.
+# When enabled, every request that masks sensitive info appends ONE metadata-only
+# JSON line to ./logs/audit.jsonl (rule type + counts + placeholders, NO plaintext).
+# Clean requests produce no line. Defaults to true if this section is omitted.
+audit:
+  enabled: true
+
 # Legacy OpenAI config (used as fallback if no engine.routes configured)
 openai:
   api_key: ""

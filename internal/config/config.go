@@ -74,6 +74,15 @@ func Init(cfgFile string) {
 	}
 }
 
+// AuditEnabled reports whether sensitive-info audit logging is on.
+// Defaults to true when the `audit.enabled` key is absent from config.
+func AuditEnabled() bool {
+	if !viper.IsSet("audit.enabled") {
+		return true
+	}
+	return viper.GetBool("audit.enabled")
+}
+
 // LoadEngineConfig loads and returns the engine configuration from viper
 func LoadEngineConfig() (*engine.EngineConfig, error) {
 	var config engine.EngineConfig

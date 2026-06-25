@@ -99,6 +99,21 @@ func generatePlaceholder(original string) string {
 	return fmt.Sprintf("__AIGIS_SEC_%s__", hashHex)
 }
 
+// maskPreview returns a partially-masked hint of a secret for audit confirmation:
+// the first 2 and last 2 runes are kept, the middle replaced by a fixed "***"
+// (the fixed marker avoids leaking the secret's length). Values of length <= 4
+// are fully masked. Never returns enough to reconstruct the original.
+//
+//	"test@example.com" -> "te***om"
+//	"13800138000"      -> "13***00"
+func maskPreview(s string) string {
+	r := []rune(s)
+	if len(r) <= 4 {
+		return "***"
+	}
+	return string(r[:2]) + "***" + string(r[len(r)-2:])
+}
+
 // Mask replaces sensitive information with placeholders and stores the mapping in the vault
 // This is for bidirectional tokenization - use Unmask() to restore the original values
 func (s *Scanner) Mask(ctx interface{}, input string, tags []string) string {
@@ -133,6 +148,16 @@ func (s *Scanner) Mask(ctx interface{}, input string, tags []string) string {
 				}
 				if vaultCtx, ok := ctx.(vaultContext); ok {
 					vaultCtx.VaultStore(placeholder, match)
+				}
+
+				// Record an audit entry (rule type + placeholder + masked preview,
+				// never full plaintext). Asserted independently of vaultContext so
+				// callers/mocks that don't audit are unaffected.
+				type auditContext interface {
+					RecordDetection(ruleType, placeholder, preview string)
+				}
+				if auditCtx, ok := ctx.(auditContext); ok {
+					auditCtx.RecordDetection(rule.Name, placeholder, maskPreview(match))
 				}
 			}
 

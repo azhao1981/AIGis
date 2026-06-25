@@ -26,6 +26,26 @@ func (m *MockVaultContext) VaultGet(placeholder string) (string, bool) {
 }
 
 
+func TestMaskPreview(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"test@example.com", "te***om"},
+		{"13800138000", "13***00"},
+		{"sk-realsecretkey1234567890", "sk***90"},
+		{"abcd", "***"}, // length <= 4 fully masked
+		{"a", "***"},
+		{"", "***"},
+		{"abcde", "ab***de"},
+	}
+	for _, c := range cases {
+		if got := maskPreview(c.in); got != c.want {
+			t.Errorf("maskPreview(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestNewScanner(t *testing.T) {
 	scanner := NewScanner()
 	if scanner == nil {
