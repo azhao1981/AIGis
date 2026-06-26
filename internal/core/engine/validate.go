@@ -74,6 +74,11 @@ func (c *EngineConfig) Validate(knownTransforms map[string]bool) error {
 				return fmt.Errorf("route %q: unknown transform type %q", route.ID, step.Type)
 			}
 		}
+		for _, step := range route.ResponseTransforms {
+			if !knownTransforms[step.Type] {
+				return fmt.Errorf("route %q: unknown response transform type %q", route.ID, step.Type)
+			}
+		}
 	}
 
 	if !hasCatchAll {

@@ -230,14 +230,31 @@ func (p *UniversalProvider) buildAuthHeaders() http.Header {
 	return headers
 }
 
-// applyResponseTransforms restores tokenized secrets in the (non-streaming)
-// response body via the registered unmask transformer.
+// applyResponseTransforms reshapes the (non-streaming) response body: first any
+// route-configured response transforms (e.g. Dify -> OpenAI shape via template),
+// then unmask to restore tokenized secrets last.
 func (p *UniversalProvider) applyResponseTransforms(ctx *core.AIGisContext, body []byte) ([]byte, error) {
-	t, ok := p.registry.Get(transform.TypeUnmask)
-	if !ok {
-		return body, nil
+	result := body
+
+	// 1. Route-configured response transforms (protocol translation, etc.)
+	for _, step := range p.route.ResponseTransforms {
+		t, ok := p.registry.Get(step.Type)
+		if !ok {
+			// Unknown transform type, skip (consistent with request path)
+			continue
+		}
+		var err error
+		if result, err = t.Apply(ctx, result, step.Config); err != nil {
+			return nil, fmt.Errorf("response transform %s failed: %w", step.Type, err)
+		}
 	}
-	return t.Apply(ctx, body, nil)
+
+	// 2. Always unmask tokenized secrets last so restored content survives any
+	//    reshaping above.
+	if t, ok := p.registry.Get(transform.TypeUnmask); ok {
+		return t.Apply(ctx, result, nil)
+	}
+	return result, nil
 }
 
 // buildUpstreamRequest constructs the upstream HTTP request (URL, env:VAR resolution,

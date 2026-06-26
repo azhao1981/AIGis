@@ -90,6 +90,25 @@ engine:
                 "response_mode": "blocking",
                 "user": {{json .user}}
               }
+      # 响应转换：把 dify 原生响应翻译回 OpenAI chat-completion 形态
+      response_transforms:
+        - type: "template"
+          config:
+            template: |
+              {
+                "id": {{json .message_id}},
+                "object": "chat.completion",
+                "created": {{json .created_at}},
+                "model": "dify",
+                "choices": [
+                  {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": {{json .answer}}},
+                    "finish_reason": "stop"
+                  }
+                ],
+                "usage": {{json .metadata.usage}}
+              }
 
     # Example: Field mapping transform (commented out)
     # - id: "custom-api"

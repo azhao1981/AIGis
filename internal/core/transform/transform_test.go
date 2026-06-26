@@ -133,6 +133,35 @@ func TestTemplateTransformDifyShape(t *testing.T) {
 	}
 }
 
+// TestTemplateTransformDifyResponseToOpenAI exercises the response-side template
+// that reshapes a Dify /chat-messages response back into OpenAI chat-completion
+// form, so OpenAI-shaped clients can read it.
+func TestTemplateTransformDifyResponseToOpenAI(t *testing.T) {
+	tr := &TemplateTransform{}
+	difyResp := `{"event":"message","message_id":"m-123","answer":"hi there","created_at":1782461104,"metadata":{"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}}`
+	config := map[string]string{
+		"template": `{"id":{{json .message_id}},"object":"chat.completion","created":{{json .created_at}},"choices":[{"index":0,"message":{"role":"assistant","content":{{json .answer}}},"finish_reason":"stop"}],"usage":{{json .metadata.usage}}}`,
+	}
+
+	out, err := tr.Apply(newCtx(), []byte(difyResp), config)
+	if err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	if id := gjson.GetBytes(out, "id").String(); id != "m-123" {
+		t.Errorf("id = %q, want m-123", id)
+	}
+	if obj := gjson.GetBytes(out, "object").String(); obj != "chat.completion" {
+		t.Errorf("object = %q, want chat.completion", obj)
+	}
+	if c := gjson.GetBytes(out, "choices.0.message.content").String(); c != "hi there" {
+		t.Errorf("content = %q, want 'hi there'", c)
+	}
+	if tt := gjson.GetBytes(out, "usage.total_tokens").Int(); tt != 15 {
+		t.Errorf("usage.total_tokens = %d, want 15", tt)
+	}
+}
+
 func TestTemplateTransformInvalidJSONOutput(t *testing.T) {
 	tr := &TemplateTransform{}
 	config := map[string]string{"template": `not json {{.user}}`}

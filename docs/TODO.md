@@ -26,9 +26,10 @@ NEXT：
 - **修正变量名**：初版误写 `token_env: DIFY_API_KEY` + 硬编码 base_url，与 .env 的 `AIGIS_DIFY_API_KEY` / `AIGIS_DIFY_BASE_URL` 不匹配 → 改用 `env:AIGIS_DIFY_BASE_URL` + `AIGIS_DIFY_API_KEY`
 - **template transform 加 `json` 函数**：JSON 转义 content，修复原模板 `{{...}}` 裸插值在内容含引号/换行时产出非法 JSON 的隐患；chat 形态 query 在顶层
 - **实测**：`dify-test` → `route_id: dify-workflow`，真实上游返回 200 + 完整 answer（env 解析/Bearer 鉴权/PII→模板→投递全链路确认）
-- **范围声明**：响应为 dify 原生格式，未翻译回 OpenAI chat-completion 形态（如需，另加响应模板）
+- **响应翻译已实现**：Route 新增 `response_transforms`（应用于非流式响应，先翻译后 unmask）；dify 路由配响应模板把 dify 原生响应 → OpenAI chat-completion 形态（object/choices/usage），实测响应体已是标准 OpenAI 结构
 - 现共 4 provider 路由：openai-default / claude-proxy / dify(chat) / fallback
-- 测试：`TestTemplateTransformDifyShape`（含引号/换行的 content 经 json 函数往返）
+- 测试：`TestTemplateTransformDifyShape`（请求转义）+ `TestTemplateTransformDifyResponseToOpenAI`（响应翻译）；validate 同时校验 response_transforms 类型
+- **仍未做**：流式（SSE）响应的 dify→OpenAI 翻译（dify 路由当前 response_mode 强制 blocking，故非流式即可）
 
 ### 3. 日志滚动切割（可选，默认关闭）
 - **opt-in**：`log.rotate` 默认 false = 单文件（交给系统 logrotate）；设 true 才启用内置 lumberjack。二者勿同管一文件（logrotate 重命名/truncate 会与 lumberjack 的 fd 冲突）

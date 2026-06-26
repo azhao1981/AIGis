@@ -13,8 +13,11 @@ type Route struct {
 	Matcher map[string]string `mapstructure:"matcher"`
 	// Upstream defines the target backend service
 	Upstream Upstream `mapstructure:"upstream"`
-	// Transforms is the pipeline of transformations to apply
+	// Transforms is the pipeline of transformations applied to the REQUEST body.
 	Transforms []TransformStep `mapstructure:"transforms"`
+	// ResponseTransforms is the pipeline applied to the (non-streaming) RESPONSE
+	// body before unmask — e.g. reshaping a Dify response back to OpenAI form.
+	ResponseTransforms []TransformStep `mapstructure:"response_transforms"`
 	// HeaderPolicy defines how to handle HTTP headers
 	HeaderPolicy HeaderPolicy `mapstructure:"header_policy"`
 }
