@@ -21,11 +21,13 @@ NEXT：
 - transform 合法类型由 `transform.KnownTypes()` 注入，保持 engine 不反向依赖 transform 实现
 - 测试：`validate_test.go`（OK 用例 + 8 个失败模式表驱动 + none/空 auth）；修了 server/集成测试夹具补 catch-all
 
-### 2. dify / 多 provider 路由打通
-- `config.yaml` 启用 `dify-workflow` 路由（OpenAI chat → dify `/workflows/run`）
-- **template transform 加 `json` 函数**：JSON 转义 content，修复原模板 `{{...}}` 裸插值在内容含引号/换行时产出非法 JSON 的隐患
-- 实测：`dify-test` 模型 → `route_id: dify-workflow`，PII→模板→上游投递整条链路打通；上游因无 `DIFY_API_KEY` 返回 unauthorized（路由/转换已证实，差真实 key）
-- 现共 4 provider 路由：openai-default / claude-proxy / dify-workflow / fallback
+### 2. dify / 多 provider 路由打通（已对真实 dify 实测 200）
+- `config.yaml` 启用 dify 路由，端点 `/chat-messages`（用户的 dify 是 chat/chatflow 类型，advanced-chat 模式）
+- **修正变量名**：初版误写 `token_env: DIFY_API_KEY` + 硬编码 base_url，与 .env 的 `AIGIS_DIFY_API_KEY` / `AIGIS_DIFY_BASE_URL` 不匹配 → 改用 `env:AIGIS_DIFY_BASE_URL` + `AIGIS_DIFY_API_KEY`
+- **template transform 加 `json` 函数**：JSON 转义 content，修复原模板 `{{...}}` 裸插值在内容含引号/换行时产出非法 JSON 的隐患；chat 形态 query 在顶层
+- **实测**：`dify-test` → `route_id: dify-workflow`，真实上游返回 200 + 完整 answer（env 解析/Bearer 鉴权/PII→模板→投递全链路确认）
+- **范围声明**：响应为 dify 原生格式，未翻译回 OpenAI chat-completion 形态（如需，另加响应模板）
+- 现共 4 provider 路由：openai-default / claude-proxy / dify(chat) / fallback
 - 测试：`TestTemplateTransformDifyShape`（含引号/换行的 content 经 json 函数往返）
 
 ### 3. 日志滚动切割（可选，默认关闭）

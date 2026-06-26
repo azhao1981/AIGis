@@ -63,19 +63,21 @@ engine:
       transforms:
         - type: "pii_claude"
           config: {}
-    # Dify workflow route: translates an OpenAI-style chat request into Dify's
-    # /workflows/run payload. PII is masked first, then the body is reshaped by
-    # the template. Requires DIFY_API_KEY in the environment.
+    # Dify chat route: translates an OpenAI-style chat request into Dify's
+    # /chat-messages payload (chat/agent/chatflow app). PII is masked first, then
+    # the body is reshaped by the template. Uses AIGIS_DIFY_BASE_URL / AIGIS_DIFY_API_KEY.
+    # NOTE: for a Workflow-type app use path "/workflows/run" and put the query
+    # under "inputs"; for a Completion app use "/completion-messages".
     # NOTE: the `json` template func quotes+escapes the value, so do NOT wrap the
     # {{json ...}} call in literal quotes — it already emits a JSON string.
     - id: "dify-workflow"
       matcher:
         model: "^dify-.*"
       upstream:
-        base_url: "https://api.dify.ai/v1"
-        path: "/workflows/run"
+        base_url: "env:AIGIS_DIFY_BASE_URL"
+        path: "/chat-messages"
         auth_strategy: "bearer"
-        token_env: "DIFY_API_KEY"
+        token_env: "AIGIS_DIFY_API_KEY"
       transforms:
         - type: "pii"
           config: {}
@@ -83,9 +85,8 @@ engine:
           config:
             template: |
               {
-                "inputs": {
-                  "query": {{json (index .messages 0 "content")}}
-                },
+                "inputs": {},
+                "query": {{json (index .messages 0 "content")}},
                 "response_mode": "blocking",
                 "user": {{json .user}}
               }
