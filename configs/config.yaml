@@ -22,6 +22,16 @@ log:
 audit:
   enabled: true
 
+# Custom sensitive-info detection rules (optional). Each rule's pattern is a Go
+# regexp; matches are tokenized (masked->vault->unmasked) exactly like the
+# built-in rules (email/phone/keys). Invalid regex fails loud at startup.
+# security:
+#   custom_rules:
+#     - name: "ID Card"          # 中国身份证（18 位）
+#       pattern: '\b\d{17}[\dXx]\b'
+#     - name: "Bank Card"
+#       pattern: '\b\d{16,19}\b'
+
 # Legacy OpenAI config (used as fallback if no engine.routes configured)
 openai:
   api_key: ""

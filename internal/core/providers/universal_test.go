@@ -32,7 +32,7 @@ func TestSend_MaskUnmaskRoundTrip(t *testing.T) {
 		Upstream:   engine.Upstream{BaseURL: up.URL, Path: "/v1/chat/completions", AuthStrategy: "none"},
 		Transforms: []engine.TransformStep{{Type: "pii", Config: map[string]string{}}},
 	}
-	p := providers.NewUniversalProvider(route, nil)
+	p := providers.NewUniversalProvider(route, nil, nil)
 	ctx := core.NewGatewayContext(context.Background(), nil)
 
 	const secret = "secret@example.com"
@@ -80,7 +80,7 @@ func TestSend_HeaderPolicyAndBearerAuth(t *testing.T) {
 			Remove: []string{"X-Remove"},
 		},
 	}
-	p := providers.NewUniversalProvider(route, nil)
+	p := providers.NewUniversalProvider(route, nil, nil)
 	ctx := core.NewGatewayContext(context.Background(), nil)
 
 	in := http.Header{}
@@ -120,7 +120,7 @@ func TestSend_UpstreamErrorSurfaces(t *testing.T) {
 		ID:       "e",
 		Upstream: engine.Upstream{BaseURL: up.URL, Path: "/x", AuthStrategy: "none"},
 	}
-	p := providers.NewUniversalProvider(route, nil)
+	p := providers.NewUniversalProvider(route, nil, nil)
 	ctx := core.NewGatewayContext(context.Background(), nil)
 
 	_, err := p.Send(ctx, []byte(`{"model":"e"}`), http.Header{})

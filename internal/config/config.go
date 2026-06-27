@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/viper"
 
 	"aigis/internal/core/engine"
+	"aigis/internal/core/security"
 )
 
 // findEnvFile 向上递归查找 .env 文件
@@ -81,6 +82,16 @@ func AuditEnabled() bool {
 		return true
 	}
 	return viper.GetBool("audit.enabled")
+}
+
+// LoadCustomRules loads user-defined sensitive-info detection rules from the
+// `security.custom_rules` config section. Returns nil when the key is absent.
+func LoadCustomRules() ([]security.CustomRule, error) {
+	var rules []security.CustomRule
+	if err := viper.UnmarshalKey("security.custom_rules", &rules); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal security.custom_rules: %w", err)
+	}
+	return rules, nil
 }
 
 // LoadEngineConfig loads and returns the engine configuration from viper

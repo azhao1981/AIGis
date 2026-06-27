@@ -27,14 +27,18 @@ type UniversalProvider struct {
 	log      *logger.Logger
 }
 
-// NewUniversalProvider creates a new universal provider for the given route
-func NewUniversalProvider(route *engine.Route, log *logger.Logger) *UniversalProvider {
+// NewUniversalProvider creates a new universal provider for the given route.
+// The scanner is injected (shared, built once at startup with any custom rules);
+// a nil scanner falls back to a default one with only built-in rules (tests).
+func NewUniversalProvider(route *engine.Route, log *logger.Logger, scanner *security.Scanner) *UniversalProvider {
 	if log == nil {
 		// Create a default logger if none provided
 		zapLogger, _ := logger.New("info")
 		log = logger.NewLogger(zapLogger)
 	}
-	scanner := security.NewScanner()
+	if scanner == nil {
+		scanner = security.NewScanner()
+	}
 	return &UniversalProvider{
 		route:    route,
 		scanner:  scanner,

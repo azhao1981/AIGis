@@ -21,6 +21,7 @@ import (
 	"aigis/internal/core/engine"
 	"aigis/internal/core/metrics"
 	"aigis/internal/core/providers"
+	"aigis/internal/core/security"
 	"aigis/internal/core/transform"
 	"aigis/internal/pkg/logger"
 )
@@ -33,6 +34,7 @@ type HTTPServer struct {
 	logger  *logger.Logger
 	auditor *audit.Auditor
 	metrics *metrics.Metrics
+	scanner *security.Scanner // shared, built once with built-in + custom rules
 }
 
 // auditLogPath is the on-disk JSONL audit trail of masked sensitive info.
@@ -89,12 +91,27 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 		zap.String("path", auditLogPath),
 	)
 
+	// Build the shared scanner once (built-in rules + user custom_rules). Custom
+	// regexes are compiled and validated here, so a bad rule fails loud at startup.
+	customRules, err := config.LoadCustomRules()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load custom rules: %w", err)
+	}
+	scanner, err := security.NewScannerWithRules(customRules)
+	if err != nil {
+		return nil, fmt.Errorf("invalid custom rule: %w", err)
+	}
+	extLogger.Info("Security scanner initialized",
+		zap.Int("custom_rules", len(customRules)),
+	)
+
 	s := &HTTPServer{
 		Server:  baseServer,
 		engine:  eng,
 		logger:  extLogger,
 		auditor: auditor,
 		metrics: metrics.New(),
+		scanner: scanner,
 	}
 
 	// Initialize mux
@@ -259,7 +276,7 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	ctx.SetMetadata("model", gjson.GetBytes(body, "model").String())
 
 	// Create universal provider for this route
-	provider := providers.NewUniversalProvider(route, reqLogger)
+	provider := providers.NewUniversalProvider(route, reqLogger, s.scanner)
 
 	// Branch on streaming: clients set "stream": true to request SSE.
 	// The flusher must be available to stream; otherwise fall back to blocking.

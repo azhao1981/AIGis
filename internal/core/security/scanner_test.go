@@ -242,6 +242,42 @@ func TestAddRule(t *testing.T) {
 	}
 }
 
+// TestNewScannerWithRules verifies config-driven custom rules tokenize and
+// round-trip like built-ins, and that the built-in rules still apply.
+func TestNewScannerWithRules(t *testing.T) {
+	scanner, err := NewScannerWithRules([]CustomRule{
+		{Name: "ID Card", Pattern: `\b\d{17}[\dXx]\b`},
+	})
+	if err != nil {
+		t.Fatalf("NewScannerWithRules failed: %v", err)
+	}
+
+	ctx := &MockVaultContext{}
+	const id = "11010519491231002X"
+	input := "我的身份证是 " + id + "，邮箱 a@b.com"
+
+	masked := scanner.Mask(ctx, input, nil)
+	if strings.Contains(masked, id) {
+		t.Errorf("custom ID rule did not tokenize: %s", masked)
+	}
+	if strings.Contains(masked, "a@b.com") {
+		t.Errorf("built-in email rule stopped working: %s", masked)
+	}
+	if got := scanner.Unmask(ctx, masked); got != input {
+		t.Errorf("Unmask() = %q, want %q", got, input)
+	}
+}
+
+// TestNewScannerWithRulesInvalid confirms a bad regex / empty name fails loud.
+func TestNewScannerWithRulesInvalid(t *testing.T) {
+	if _, err := NewScannerWithRules([]CustomRule{{Name: "Bad", Pattern: `(unclosed`}}); err == nil {
+		t.Error("expected error for invalid regex, got nil")
+	}
+	if _, err := NewScannerWithRules([]CustomRule{{Name: "", Pattern: `x`}}); err == nil {
+		t.Error("expected error for empty rule name, got nil")
+	}
+}
+
 func TestGetRules(t *testing.T) {
 	scanner := NewScanner()
 

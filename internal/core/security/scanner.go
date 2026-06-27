@@ -230,6 +230,33 @@ func (s *Scanner) Unmask(ctx interface{}, input string) string {
 	return result
 }
 
+// CustomRule is a user-defined detection rule loaded from config
+// (security.custom_rules). Name labels the rule (used as the audit rule-type and
+// to derive the Sanitize replacement); Pattern is its regular expression. Custom
+// rules tokenize exactly like the built-in ones.
+type CustomRule struct {
+	Name    string `mapstructure:"name"`
+	Pattern string `mapstructure:"pattern"`
+}
+
+// NewScannerWithRules builds a scanner with the built-in rules plus the given
+// custom rules appended. It returns an error if a custom rule has an empty name
+// or an invalid regexp, so a bad config fails loud at startup instead of
+// silently dropping a rule. With no custom rules it is equivalent to NewScanner.
+func NewScannerWithRules(custom []CustomRule) (*Scanner, error) {
+	s := NewScanner()
+	for i, r := range custom {
+		if r.Name == "" {
+			return nil, fmt.Errorf("custom rule #%d has an empty name", i)
+		}
+		replacement := "[" + strings.ToUpper(strings.ReplaceAll(r.Name, " ", "_")) + "_REDACTED]"
+		if err := s.AddRule(r.Name, r.Pattern, replacement); err != nil {
+			return nil, fmt.Errorf("custom rule %q: %w", r.Name, err)
+		}
+	}
+	return s, nil
+}
+
 // AddRule 动态添加自定义规则
 func (s *Scanner) AddRule(name string, pattern string, replacement string) error {
 	compiled, err := regexp.Compile(pattern)
