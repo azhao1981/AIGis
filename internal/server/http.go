@@ -19,6 +19,7 @@ import (
 	"aigis/internal/core"
 	"aigis/internal/core/audit"
 	"aigis/internal/core/engine"
+	"aigis/internal/core/limiter"
 	"aigis/internal/core/metrics"
 	"aigis/internal/core/providers"
 	"aigis/internal/core/security"
@@ -34,7 +35,8 @@ type HTTPServer struct {
 	logger  *logger.Logger
 	auditor *audit.Auditor
 	metrics *metrics.Metrics
-	scanner *security.Scanner // shared, built once with built-in + custom rules
+	scanner *security.Scanner           // shared, built once with built-in + custom rules
+	limiter *limiter.ConcurrencyLimiter // global in-flight cap (no-op when unconfigured)
 }
 
 // auditLogPath is the on-disk JSONL audit trail of masked sensitive info.
@@ -105,6 +107,11 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 		zap.Int("custom_rules", len(customRules)),
 	)
 
+	maxConcurrent := config.MaxConcurrent()
+	extLogger.Info("Concurrency limiter initialized",
+		zap.Int("max_concurrent", maxConcurrent), // 0 = unlimited
+	)
+
 	s := &HTTPServer{
 		Server:  baseServer,
 		engine:  eng,
@@ -112,6 +119,7 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 		auditor: auditor,
 		metrics: metrics.New(),
 		scanner: scanner,
+		limiter: limiter.New(maxConcurrent),
 	}
 
 	// Initialize mux
@@ -197,6 +205,19 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Admission control: reject when the global in-flight ceiling is reached
+	// (no-op when limit.max_concurrent is 0). Done before any work so an
+	// overload sheds load cheaply. Released on every return path.
+	if !s.limiter.Acquire() {
+		s.logger.Warn("Rate limited: max concurrency reached",
+			zap.Int64("in_flight", s.limiter.InFlight()),
+		)
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Too many requests", http.StatusTooManyRequests)
+		return
+	}
+	defer s.limiter.Release()
 
 	// Concurrency monitoring: count this request as in-flight for its whole
 	// lifetime. succeeded defaults to false so any early-return error path tallies

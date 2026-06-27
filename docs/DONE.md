@@ -6,6 +6,13 @@
 
 ## 2026-06-27
 
+### 全局并发限流 (limit.max_concurrent)
+- 新增 `internal/core/limiter`：`ConcurrencyLimiter`（CAS 原子计数，`max=0` 不限=默认）`Acquire/Release/InFlight`
+- `handleGateway` 入口 `Acquire` 失败→**HTTP 429 + Retry-After**，`defer Release` 覆盖所有返回路径（含流式）；在读 body 前做，过载早卸载
+- 与 metrics 分离（metrics 只监控不限流）；`config.yaml` `limit.max_concurrent`（默认 0=不限，零行为变更）
+- 踩坑修复：初版「先加再回滚」race 下计数瞬时过冲（`InFlight 9 > max 8`）→ 改 CAS 循环（只在 `cur<max` 时递增），永不超限，与 metrics peak CAS 一致
+- 验证：limiter 单测含 `-race`（打满/释放/max=0 恒放行/200 goroutine 不超限归零）+ 真机 e2e（慢上游 + max=1，并发两请求→一个 200 一个 429）
+
 ### 新增 gemini provider 路由（OpenAI 兼容端点，零翻译）
 - `config.yaml` 加 `gemini-default` 路由：matcher `^gemini-.*`，upstream `env:AIGIS_GEMINI_BASE_URL`(/v1 OpenAI 兼容端点) + `path: /chat/completions` + bearer + `token_env: GEMINI_API_KEY`，transform 仅 pii
 - 选 OpenAI 兼容端点而非 gemini 原生（contents/parts）：请求/响应进出都是 OpenAI 形态，**无需协议翻译**（不像 dify）；流式走默认透传 unmask 即可（上游回 OpenAI 格式 SSE）

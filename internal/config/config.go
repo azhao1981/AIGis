@@ -84,6 +84,12 @@ func AuditEnabled() bool {
 	return viper.GetBool("audit.enabled")
 }
 
+// MaxConcurrent returns the configured global in-flight request ceiling from
+// `limit.max_concurrent`. Defaults to 0 (unlimited) when the key is absent.
+func MaxConcurrent() int {
+	return viper.GetInt("limit.max_concurrent")
+}
+
 // LoadCustomRules loads user-defined sensitive-info detection rules from the
 // `security.custom_rules` config section. Returns nil when the key is absent.
 func LoadCustomRules() ([]security.CustomRule, error) {
