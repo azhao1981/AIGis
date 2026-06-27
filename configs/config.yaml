@@ -43,7 +43,12 @@ engine:
         token_env: "AIGIS_OPENAI_API_KEY"  # Environment variable name
       transforms:
         - type: "pii"
-          config: {}  # Uses default patterns
+          # config.email tunes email tokenization:
+          #   (omitted)/"full" — tokenize the whole address (default, most strict)
+          #   "local"          — tokenize only the local part, keep "@domain" so
+          #                      the model still sees the domain. Unmask restores
+          #                      the full address on the way back regardless.
+          config: {}  # Uses default patterns (email: full)
     - id: "claude-proxy"
       matcher:
         model: "^(claude|glm).*"
@@ -80,17 +85,23 @@ engine:
         token_env: "AIGIS_DIFY_API_KEY"
       transforms:
         - type: "pii"
-          config: {}
+          config:
+            email: "local"  # keep @domain visible to dify, tokenize only the mailbox
         - type: "template"
           config:
+            # response_mode follows the client's "stream" flag: streaming when the
+            # client wants SSE (translated back by stream_translate below), else
+            # blocking (translated by response_transforms below).
             template: |
               {
                 "inputs": {},
                 "query": {{json (index .messages 0 "content")}},
-                "response_mode": "blocking",
+                "response_mode": {{if .stream}}"streaming"{{else}}"blocking"{{end}},
                 "user": {{json .user}}
               }
-      # 响应转换：把 dify 原生响应翻译回 OpenAI chat-completion 形态
+      # 流式响应翻译：dify SSE 事件流 -> OpenAI chat.completion.chunk 流
+      stream_translate: "dify"
+      # 非流式响应转换：把 dify 原生响应翻译回 OpenAI chat-completion 形态
       response_transforms:
         - type: "template"
           config:

@@ -36,23 +36,51 @@ var sseDelimiter = []byte("\n\n")
 var partialPlaceholderRe = regexp.MustCompile(
 	`_+(A(I(G(I(S(_(S(E(C(_[0-9a-f]{0,12}_{0,2})?)?)?)?)?)?)?)?)?)?$`)
 
+// carryUnmask holds the cross-event placeholder reassembly state shared by
+// stream transformers. A tokenization placeholder can be split across SSE
+// events, so feed() holds back a trailing fragment that might still be an
+// incomplete placeholder prefix until a later increment completes or rules it
+// out. It is COMPOSED into a transformer (each holds one), never embedded as a
+// base class.
+type carryUnmask struct {
+	scanner *security.Scanner
+	ctx     *core.AIGisContext
+	carry   string
+}
+
+// feed accumulates an incoming text increment with the carried-over fragment,
+// unmasks any now-complete placeholders, and returns the portion safe to emit
+// (holding back a trailing fragment that might still be a partial placeholder).
+func (c *carryUnmask) feed(text string) string {
+	combined := c.scanner.Unmask(c.ctx, c.carry+text)
+	flush, carry := splitSafe(combined)
+	c.carry = carry
+	return flush
+}
+
+// remainder returns and clears any held-back fragment that never completed,
+// for emission verbatim at end-of-stream.
+func (c *carryUnmask) remainder() string {
+	r := c.carry
+	c.carry = ""
+	return r
+}
+
 // StreamUnmasker restores tokenized secrets in a streaming response, handling
 // placeholders that are split across multiple SSE text deltas.
 //
 // It keeps two independent buffers:
 //   - eventBuf: raw bytes not yet forming a complete SSE event (split on "\n\n")
-//   - textCarry: a trailing text fragment that may be a partial placeholder,
-//     held back across text deltas until it can be completed or ruled out.
+//   - cu: a trailing text fragment that may be a partial placeholder, held back
+//     across text deltas until it can be completed or ruled out.
 type StreamUnmasker struct {
-	scanner   *security.Scanner
-	ctx       *core.AIGisContext
-	eventBuf  []byte
-	textCarry string
+	cu       carryUnmask
+	eventBuf []byte
 }
 
 // NewStreamUnmasker creates a StreamUnmasker bound to the request context/vault.
 func NewStreamUnmasker(scanner *security.Scanner, ctx *core.AIGisContext) *StreamUnmasker {
-	return &StreamUnmasker{scanner: scanner, ctx: ctx}
+	return &StreamUnmasker{cu: carryUnmask{scanner: scanner, ctx: ctx}}
 }
 
 // Write processes upstream bytes, emitting complete (rewritten) SSE events.
@@ -86,9 +114,8 @@ func (u *StreamUnmasker) Flush() ([]byte, error) {
 		u.eventBuf = nil
 	}
 	// Any held-back placeholder fragment never completed: emit it verbatim.
-	if u.textCarry != "" {
-		out.WriteString(u.textCarry)
-		u.textCarry = ""
+	if rem := u.cu.remainder(); rem != "" {
+		out.WriteString(rem)
 	}
 	return out.Bytes(), nil
 }
@@ -130,7 +157,7 @@ func (u *StreamUnmasker) rewriteTextDelta(data string) (string, bool, bool) {
 	// Claude: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
 	if gjson.Get(data, "type").String() == "content_block_delta" {
 		if t := gjson.Get(data, "delta.text"); t.Exists() {
-			flush := u.feed(t.String())
+			flush := u.cu.feed(t.String())
 			out, err := sjson.Set(data, "delta.text", flush)
 			if err != nil {
 				return data, false, false
@@ -140,7 +167,7 @@ func (u *StreamUnmasker) rewriteTextDelta(data string) (string, bool, bool) {
 	}
 	// OpenAI: {"choices":[{"delta":{"content":"..."}}]}
 	if c := gjson.Get(data, "choices.0.delta.content"); c.Exists() {
-		flush := u.feed(c.String())
+		flush := u.cu.feed(c.String())
 		out, err := sjson.Set(data, "choices.0.delta.content", flush)
 		if err != nil {
 			return data, false, false
@@ -150,16 +177,6 @@ func (u *StreamUnmasker) rewriteTextDelta(data string) (string, bool, bool) {
 	return data, false, false
 }
 
-// feed accumulates an incoming text increment with the carried-over fragment,
-// unmasks any now-complete placeholders, and returns the portion safe to emit
-// (holding back a trailing fragment that might still be a partial placeholder).
-func (u *StreamUnmasker) feed(text string) string {
-	combined := u.scanner.Unmask(u.ctx, u.textCarry+text)
-	flush, carry := splitSafe(combined)
-	u.textCarry = carry
-	return flush
-}
-
 // splitSafe separates s into the part safe to emit now and a trailing fragment
 // that could still be the beginning of an incomplete placeholder.
 func splitSafe(s string) (flush, carry string) {
@@ -167,4 +184,35 @@ func splitSafe(s string) (flush, carry string) {
 		return s[:loc[0]], s[loc[0]:]
 	}
 	return s, ""
+}
+
+// Stream translator names used in route config (stream_translate).
+const (
+	StreamTranslateUnmask = "unmask" // passthrough + cross-chunk unmask (default)
+	StreamTranslateDify   = "dify"   // Dify SSE -> OpenAI chunk SSE
+)
+
+// NewStreamTransformer builds the stream response transformer named by a route's
+// stream_translate field. Empty or "unmask" yields the default passthrough
+// unmasker (existing behavior); "dify" yields the Dify->OpenAI translator.
+// ok is false for an unknown name (config validation rejects those at startup).
+func NewStreamTransformer(name string, scanner *security.Scanner, ctx *core.AIGisContext) (StreamTransformer, bool) {
+	switch name {
+	case "", StreamTranslateUnmask:
+		return NewStreamUnmasker(scanner, ctx), true
+	case StreamTranslateDify:
+		return NewDifyStreamTranslator(scanner, ctx), true
+	default:
+		return nil, false
+	}
+}
+
+// KnownStreamTranslators returns the valid stream_translate values, injected
+// into config validation so a typo fails loud at startup (mirrors KnownTypes).
+func KnownStreamTranslators() map[string]bool {
+	return map[string]bool{
+		"":                    true,
+		StreamTranslateUnmask: true,
+		StreamTranslateDify:   true,
+	}
 }

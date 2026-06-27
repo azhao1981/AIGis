@@ -18,6 +18,10 @@ type Route struct {
 	// ResponseTransforms is the pipeline applied to the (non-streaming) RESPONSE
 	// body before unmask — e.g. reshaping a Dify response back to OpenAI form.
 	ResponseTransforms []TransformStep `mapstructure:"response_transforms"`
+	// StreamTranslate names the stream response translator for the SSE path
+	// (e.g. "dify" to translate Dify SSE into OpenAI chunks). Empty/"unmask"
+	// means passthrough + cross-chunk unmask. Validated against known names.
+	StreamTranslate string `mapstructure:"stream_translate"`
 	// HeaderPolicy defines how to handle HTTP headers
 	HeaderPolicy HeaderPolicy `mapstructure:"header_policy"`
 }

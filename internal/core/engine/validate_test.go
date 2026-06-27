@@ -11,6 +11,11 @@ var known = map[string]bool{
 	"pii": true, "pii_claude": true, "field_map": true, "template": true, "unmask": true,
 }
 
+// knownStream mirrors transform.KnownStreamTranslators() for the same reason.
+var knownStream = map[string]bool{
+	"": true, "unmask": true, "dify": true,
+}
+
 // validRoutes returns a minimal config that passes Validate: one model route
 // plus a catch-all. Callers mutate it to exercise a single failure mode.
 func validRoutes() []Route {
@@ -33,7 +38,7 @@ func validRoutes() []Route {
 
 func TestValidate_OK(t *testing.T) {
 	c := &EngineConfig{Routes: validRoutes()}
-	if err := c.Validate(known); err != nil {
+	if err := c.Validate(known, knownStream); err != nil {
 		t.Fatalf("expected valid config, got error: %v", err)
 	}
 }
@@ -80,6 +85,11 @@ func TestValidate_Failures(t *testing.T) {
 			wantSub: "unknown transform type",
 		},
 		{
+			name:    "unknown stream_translate",
+			mutate:  func(r []Route) []Route { r[0].StreamTranslate = "telepathy"; return r },
+			wantSub: "unknown stream_translate",
+		},
+		{
 			name: "no catch-all",
 			mutate: func(r []Route) []Route {
 				r[1].Matcher = map[string]string{"model": "^x-.*"} // fallback now has a matcher
@@ -92,7 +102,7 @@ func TestValidate_Failures(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &EngineConfig{Routes: tc.mutate(validRoutes())}
-			err := c.Validate(known)
+			err := c.Validate(known, knownStream)
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tc.wantSub)
 			}
@@ -108,7 +118,7 @@ func TestValidate_NoneAuthStrategyOK(t *testing.T) {
 	r := validRoutes()
 	r[0].Upstream.AuthStrategy = "none"
 	r[1].Upstream.AuthStrategy = ""
-	if err := (&EngineConfig{Routes: r}).Validate(known); err != nil {
+	if err := (&EngineConfig{Routes: r}).Validate(known, knownStream); err != nil {
 		t.Fatalf("none/empty auth_strategy should be valid, got: %v", err)
 	}
 }

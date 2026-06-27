@@ -27,15 +27,18 @@ type PIITransform struct {
 
 func (t *PIITransform) Name() string { return t.name }
 
-func (t *PIITransform) Apply(ctx *core.AIGisContext, body []byte, _ map[string]string) ([]byte, error) {
+func (t *PIITransform) Apply(ctx *core.AIGisContext, body []byte, config map[string]string) ([]byte, error) {
+	// "email" config selects email tokenization: "local" preserves the domain,
+	// anything else (incl. empty) tokenizes the whole address.
+	opts := security.MaskOptions{EmailMode: config["email"]}
 	if t.format == formatClaude {
-		return t.applyClaude(ctx, body)
+		return t.applyClaude(ctx, body, opts)
 	}
-	return t.applyOpenAI(ctx, body)
+	return t.applyOpenAI(ctx, body, opts)
 }
 
 // applyOpenAI redacts messages[].content string fields (OpenAI chat format).
-func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte) ([]byte, error) {
+func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, opts security.MaskOptions) ([]byte, error) {
 	root, err := sonic.Get(body)
 	if err != nil {
 		return body, nil // Return original if parse fails
@@ -72,7 +75,7 @@ func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte) ([]byte,
 			continue
 		}
 
-		newContent := t.scanner.Mask(ctx, contentStr, nil)
+		newContent := t.scanner.MaskWithOptions(ctx, contentStr, nil, opts)
 		if newContent != contentStr {
 			msgNode.Set("content", ast.NewString(newContent))
 		}
@@ -84,9 +87,9 @@ func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte) ([]byte,
 
 // applyClaude redacts the top-level "system" string and messages[].content,
 // where content can be a string or an array of typed blocks (Claude format).
-func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte) ([]byte, error) {
+func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte, opts security.MaskOptions) ([]byte, error) {
 	redact := func(s string) string {
-		return t.scanner.Mask(ctx, s, nil)
+		return t.scanner.MaskWithOptions(ctx, s, nil, opts)
 	}
 
 	root, err := sonic.Get(body)

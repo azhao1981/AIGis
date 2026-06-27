@@ -41,6 +41,29 @@ func TestPIITransformOpenAI(t *testing.T) {
 	}
 }
 
+func TestPIITransformEmailLocalConfig(t *testing.T) {
+	scanner := security.NewScanner()
+	tr := &PIITransform{name: TypePII, format: formatOpenAI, scanner: scanner}
+	ctx := newCtx()
+
+	body := `{"messages":[{"role":"user","content":"reach me at alice@example.com"}]}`
+	out, err := tr.Apply(ctx, []byte(body), map[string]string{"email": "local"})
+	if err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	got := string(out)
+	if !strings.Contains(got, "@example.com") {
+		t.Errorf("domain should be preserved in local mode: %s", got)
+	}
+	if strings.Contains(got, "alice") {
+		t.Errorf("local part should be tokenized: %s", got)
+	}
+	if !placeholderRe.MatchString(got) {
+		t.Errorf("expected placeholder in output: %s", got)
+	}
+}
+
 func TestPIITransformClaude(t *testing.T) {
 	scanner := security.NewScanner()
 	tr := &PIITransform{name: TypePIIClaude, format: formatClaude, scanner: scanner}

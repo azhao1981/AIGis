@@ -63,7 +63,7 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 
 	// Validate config before building the engine so a bad config fails loud at
 	// startup instead of misrouting (or panicking) on a live request.
-	if err := engineConfig.Validate(transform.KnownTypes()); err != nil {
+	if err := engineConfig.Validate(transform.KnownTypes(), transform.KnownStreamTranslators()); err != nil {
 		return nil, fmt.Errorf("invalid engine config: %w", err)
 	}
 

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // Rule 定义了敏感信息检测规则
@@ -114,11 +115,34 @@ func maskPreview(s string) string {
 	return string(r[:2]) + "***" + string(r[len(r)-2:])
 }
 
-// Mask replaces sensitive information with placeholders and stores the mapping in the vault
-// This is for bidirectional tokenization - use Unmask() to restore the original values
+// Email tokenization modes for MaskOptions.EmailMode.
+const (
+	EmailModeFull  = "full"  // tokenize the whole address (default)
+	EmailModeLocal = "local" // tokenize only the local part, preserve "@domain"
+)
+
+// MaskOptions tunes how Mask tokenizes specific rule types. The zero value
+// reproduces the original behavior (every match tokenized whole).
+type MaskOptions struct {
+	// EmailMode selects email tokenization. "" and "full" tokenize the whole
+	// address; "local" tokenizes only the local part (before "@") and leaves the
+	// domain in place, so the model still sees e.g. a corporate domain without
+	// learning the real mailbox. Unmask restores the local part regardless,
+	// since the placeholder simply sits in front of the preserved "@domain".
+	EmailMode string
+}
+
+// Mask replaces sensitive information with placeholders and stores the mapping
+// in the vault, using default options. This is for bidirectional tokenization —
+// use Unmask() to restore the original values.
 func (s *Scanner) Mask(ctx interface{}, input string, tags []string) string {
-	// ctx should be *core.AIGisContext, but we use interface{} to avoid circular import
-	// We'll type-assert the vault methods
+	return s.MaskWithOptions(ctx, input, tags, MaskOptions{})
+}
+
+// MaskWithOptions is Mask with explicit tokenization options (see MaskOptions).
+func (s *Scanner) MaskWithOptions(ctx interface{}, input string, tags []string, opts MaskOptions) string {
+	// ctx should be *core.AIGisContext, but we use interface{} to avoid circular
+	// import; we type-assert the vault/audit methods below.
 
 	result := input
 	for _, rule := range s.rules {
@@ -138,7 +162,17 @@ func (s *Scanner) Mask(ctx interface{}, input string, tags []string) string {
 
 		// Use ReplaceAllStringFunc to generate unique placeholders for each match
 		result = rule.Pattern.ReplaceAllStringFunc(result, func(match string) string {
-			placeholder := generatePlaceholder(match)
+			// Decide which substring of the match is the secret to tokenize.
+			// Default: the whole match. Email-local mode: only the part before
+			// "@", keeping "@domain" (suffix) verbatim after the placeholder.
+			secret, suffix := match, ""
+			if rule.Name == "Email" && opts.EmailMode == EmailModeLocal {
+				if at := strings.IndexByte(match, '@'); at > 0 {
+					secret, suffix = match[:at], match[at:]
+				}
+			}
+
+			placeholder := generatePlaceholder(secret)
 
 			// Store the mapping in the vault if ctx is valid
 			if ctx != nil {
@@ -147,7 +181,7 @@ func (s *Scanner) Mask(ctx interface{}, input string, tags []string) string {
 					VaultStore(placeholder, original string)
 				}
 				if vaultCtx, ok := ctx.(vaultContext); ok {
-					vaultCtx.VaultStore(placeholder, match)
+					vaultCtx.VaultStore(placeholder, secret)
 				}
 
 				// Record an audit entry (rule type + placeholder + masked preview,
@@ -157,11 +191,11 @@ func (s *Scanner) Mask(ctx interface{}, input string, tags []string) string {
 					RecordDetection(ruleType, placeholder, preview string)
 				}
 				if auditCtx, ok := ctx.(auditContext); ok {
-					auditCtx.RecordDetection(rule.Name, placeholder, maskPreview(match))
+					auditCtx.RecordDetection(rule.Name, placeholder, maskPreview(secret))
 				}
 			}
 
-			return placeholder
+			return placeholder + suffix
 		})
 	}
 	return result
@@ -195,7 +229,6 @@ func (s *Scanner) Unmask(ctx interface{}, input string) string {
 
 	return result
 }
-
 
 // AddRule 动态添加自定义规则
 func (s *Scanner) AddRule(name string, pattern string, replacement string) error {

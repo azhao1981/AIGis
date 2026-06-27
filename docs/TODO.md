@@ -10,6 +10,11 @@ NEXT：
 1. 记录 敏感信息  ✅ 已完成（2026-06-26）
 2. 并发监控  ✅ 已完成（2026-06-26）
 3. 消息回溯（往回替换）  ✅ 已完成
+4. 邮箱脱敏可选策略（保留域名）  ✅ 已完成（2026-06-27）：
+   - `security.MaskOptions{EmailMode}`：`full`(默认,整封替换) / `local`(只替换 @ 前的 mailbox,保留 @domain)
+   - `Mask` 保持默认包装零破坏；email-local 按 `@` 切分,vault 只存 local,Unmask 自动重组完整邮箱(占位符紧贴 @domain)
+   - 配置驱动:PII transform 读 `config.email`;`config.yaml` dify 路由设 `email: "local"`
+   - 测试:scanner(full/local/子域名/unmask 还原) + pii transform(config 驱动);真机双证——echo 上游抓包确认发往上游为 `占位符@example.com`(域名保留、mailbox 脱敏) + 真实 dify 流式往返完整还原邮箱无泄漏
 
 ---
 
@@ -29,7 +34,13 @@ NEXT：
 - **响应翻译已实现**：Route 新增 `response_transforms`（应用于非流式响应，先翻译后 unmask）；dify 路由配响应模板把 dify 原生响应 → OpenAI chat-completion 形态（object/choices/usage），实测响应体已是标准 OpenAI 结构
 - 现共 4 provider 路由：openai-default / claude-proxy / dify(chat) / fallback
 - 测试：`TestTemplateTransformDifyShape`（请求转义）+ `TestTemplateTransformDifyResponseToOpenAI`（响应翻译）；validate 同时校验 response_transforms 类型
-- **仍未做**：流式（SSE）响应的 dify→OpenAI 翻译（dify 路由当前 response_mode 强制 blocking，故非流式即可）
+- **流式（SSE）响应的 dify→OpenAI 翻译** ✅ 已完成（2026-06-27）：
+  - 请求模板 `response_mode` 改为按客户端 `.stream` 切换（`{{if .stream}}streaming{{else}}blocking{{end}}`），dify 路由不再强制 blocking
+  - 新增 `transform.DifyStreamTranslator`（实现 `StreamTransformer`，Adapter）：dify SSE 事件流 → OpenAI `chat.completion.chunk` 流。`message`/`agent_message`→delta（首块带 role）、`message_end`→stop 块 + `[DONE]`；`ping`/`workflow_*`/`node_*`/`tts_message` 等丢弃；Flush 兜底保证上游中断也收尾
+  - 抽出 `carryUnmask`（组合，非继承）：占位符跨事件重组逻辑由 `StreamUnmasker` 与新 translator 共用，避免分叉
+  - 配置驱动选择：路由加 `stream_translate`（`config.yaml` dify 路由设 `"dify"`），`transform.NewStreamTransformer(name)` 工厂；空/`unmask` 仍走原透传（行为不变）
+  - validate 新增 `stream_translate` 已知值校验（注入 `transform.KnownStreamTranslators()`，坏值启动期报错）
+  - 测试：`dify_stream_test.go`（基础翻译/丢弃非答案事件/占位符跨两 message 还原/无 message_end 兜底）+ validate 新失败用例；transform & engine & server 全绿
 
 ### 3. 日志滚动切割（可选，默认关闭）
 - **opt-in**：`log.rotate` 默认 false = 单文件（交给系统 logrotate）；设 true 才启用内置 lumberjack。二者勿同管一文件（logrotate 重命名/truncate 会与 lumberjack 的 fd 冲突）

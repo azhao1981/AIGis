@@ -21,9 +21,10 @@ var validAuthStrategies = map[string]bool{
 // meant to run once at startup so a bad config fails loud and early instead of
 // during a live request.
 //
-// knownTransforms is the set of transform type names the runtime can dispatch.
-// It is passed in (rather than imported) to keep this package decoupled from the
-// transform implementations — see transform.KnownTypes().
+// knownTransforms and knownStreamTranslators are the sets of names the runtime
+// can dispatch. They are passed in (rather than imported) to keep this package
+// decoupled from the transform implementations — see transform.KnownTypes() and
+// transform.KnownStreamTranslators().
 //
 // Rules enforced:
 //   - at least one route is configured
@@ -32,8 +33,9 @@ var validAuthStrategies = map[string]bool{
 //   - every route has an upstream base_url
 //   - every auth_strategy is recognized
 //   - every transform type is known
+//   - every stream_translate name is known
 //   - at least one catch-all route (empty matcher) exists, else some requests 404
-func (c *EngineConfig) Validate(knownTransforms map[string]bool) error {
+func (c *EngineConfig) Validate(knownTransforms, knownStreamTranslators map[string]bool) error {
 	if len(c.Routes) == 0 {
 		return fmt.Errorf("engine config has no routes")
 	}
@@ -78,6 +80,10 @@ func (c *EngineConfig) Validate(knownTransforms map[string]bool) error {
 			if !knownTransforms[step.Type] {
 				return fmt.Errorf("route %q: unknown response transform type %q", route.ID, step.Type)
 			}
+		}
+
+		if !knownStreamTranslators[route.StreamTranslate] {
+			return fmt.Errorf("route %q: unknown stream_translate %q", route.ID, route.StreamTranslate)
 		}
 	}
 

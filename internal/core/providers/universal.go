@@ -103,9 +103,15 @@ func (p *UniversalProvider) SendStream(ctx *core.AIGisContext, body []byte, orig
 	}
 
 	// Step 3: Stream the SSE response, restoring tokenized secrets. The
-	// StreamUnmasker handles placeholders split across multiple SSE text
-	// deltas (the common case, since the upstream emits one token at a time).
-	st := transform.NewStreamUnmasker(p.scanner, ctx)
+	// transformer is chosen by the route's stream_translate: the default
+	// StreamUnmasker passes events through (handling placeholders split across
+	// SSE text deltas), while e.g. "dify" translates Dify SSE into OpenAI
+	// chunks. An unknown name is rejected at config validation; fall back to the
+	// passthrough unmasker defensively here.
+	st, ok := transform.NewStreamTransformer(p.route.StreamTranslate, p.scanner, ctx)
+	if !ok {
+		st = transform.NewStreamUnmasker(p.scanner, ctx)
+	}
 	buf := make([]byte, 4096)
 	for {
 		n, readErr := resp.Body.Read(buf)

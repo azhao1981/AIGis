@@ -25,7 +25,6 @@ func (m *MockVaultContext) VaultGet(placeholder string) (string, bool) {
 	return original, ok
 }
 
-
 func TestMaskPreview(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -407,5 +406,69 @@ func TestSanitizeBackwardCompatibility(t *testing.T) {
 	// Should NOT use vault-style placeholders
 	if strings.Contains(sanitized, "__AIGIS_SEC_") {
 		t.Errorf("Sanitize() should not use vault placeholders")
+	}
+}
+
+// TestMaskEmailLocalMode verifies the EmailModeLocal option tokenizes only the
+// local part of an address while preserving "@domain", and that Unmask still
+// reconstructs the full address. Other PII (phone) is unaffected by the option.
+func TestMaskEmailLocalMode(t *testing.T) {
+	scanner := NewScanner()
+
+	cases := []struct {
+		name       string
+		input      string
+		keepDomain string // domain substring that must survive masking
+		gone       string // local-part substring that must be tokenized away
+	}{
+		{"simple", "mail: dawang@example.com ok", "@example.com", "dawang"},
+		{"subdomain", "to a.b@mail.corp.com now", "@mail.corp.com", "a.b@"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &MockVaultContext{}
+			masked := scanner.MaskWithOptions(ctx, tc.input, nil, MaskOptions{EmailMode: EmailModeLocal})
+
+			if !strings.Contains(masked, tc.keepDomain) {
+				t.Errorf("domain not preserved: %q", masked)
+			}
+			if strings.Contains(masked, tc.gone) {
+				t.Errorf("local part leaked (not tokenized): %q", masked)
+			}
+			if !strings.Contains(masked, "__AIGIS_SEC_") {
+				t.Errorf("local part not tokenized: %q", masked)
+			}
+			// Vault must store only the local part, never the domain.
+			for _, original := range ctx.vault {
+				if strings.Contains(original, "@") {
+					t.Errorf("vault stored domain too: %q", original)
+				}
+			}
+			// Unmask reconstructs the full original address.
+			if got := scanner.Unmask(ctx, masked); got != tc.input {
+				t.Errorf("Unmask() = %q, want %q", got, tc.input)
+			}
+		})
+	}
+}
+
+// TestMaskEmailFullModeUnchanged confirms the default (full) tokenizes the whole
+// address — domain included — so existing behavior is preserved.
+func TestMaskEmailFullModeUnchanged(t *testing.T) {
+	scanner := NewScanner()
+	ctx := &MockVaultContext{}
+	const input = "mail: dawang@example.com ok"
+
+	// Default Mask and explicit full mode must behave identically.
+	masked := scanner.Mask(ctx, input, nil)
+	if strings.Contains(masked, "@example.com") || strings.Contains(masked, "dawang") {
+		t.Errorf("full mode should tokenize the whole address: %q", masked)
+	}
+	if scanner.MaskWithOptions(&MockVaultContext{}, input, nil, MaskOptions{EmailMode: EmailModeFull}) != masked {
+		t.Errorf("explicit full mode must equal default Mask")
+	}
+	if got := scanner.Unmask(ctx, masked); got != input {
+		t.Errorf("Unmask() = %q, want %q", got, input)
 	}
 }
