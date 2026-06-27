@@ -102,7 +102,11 @@ func (d *DifyStreamTranslator) processEvent(event string) string {
 	}
 
 	switch gjson.Get(data, "event").String() {
-	case "message", "agent_message":
+	case "message", "agent_message", "message_replace":
+		// message_replace is emitted when output moderation rewrites the answer.
+		// Streaming can't retract deltas already sent to the client, so we surface
+		// the replacement text as an additional delta (the original is unavoidably
+		// already on the wire — use blocking mode if true retraction is required).
 		if d.id == "" {
 			d.id = gjson.Get(data, "message_id").String()
 			d.created = gjson.Get(data, "created_at").Int()
@@ -115,7 +119,7 @@ func (d *DifyStreamTranslator) processEvent(event string) string {
 	case "message_end":
 		return d.finish()
 	default:
-		return "" // ping / workflow_* / node_* / tts_message / message_replace / error
+		return "" // ping / workflow_* / node_* / tts_message / error
 	}
 }
 

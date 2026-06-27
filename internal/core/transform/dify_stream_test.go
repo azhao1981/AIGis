@@ -101,6 +101,24 @@ func TestDifyStreamSplitPlaceholder(t *testing.T) {
 	}
 }
 
+// TestDifyStreamMessageReplace: a message_replace event surfaces its replacement
+// answer as a delta (streaming can't retract, but it must not be silently dropped).
+func TestDifyStreamMessageReplace(t *testing.T) {
+	d := NewDifyStreamTranslator(security.NewScanner(), newCtx())
+	got := feedDify(d, []string{
+		difyEvent(`{"event":"message","message_id":"m","created_at":1,"answer":"secret stuff"}`),
+		difyEvent(`{"event":"message_replace","message_id":"m","created_at":1,"answer":"[内容已屏蔽]"}`),
+		difyEvent(`{"event":"message_end"}`),
+	})
+
+	if !strings.Contains(got, "[内容已屏蔽]") {
+		t.Errorf("message_replace content not surfaced to client:\n%s", got)
+	}
+	if !strings.Contains(got, "data: [DONE]") {
+		t.Errorf("stream not terminated:\n%s", got)
+	}
+}
+
 // TestDifyStreamTerminatesWithoutMessageEnd: if the upstream stream is cut
 // before message_end, Flush must still terminate the client stream cleanly.
 func TestDifyStreamTerminatesWithoutMessageEnd(t *testing.T) {
