@@ -59,6 +59,21 @@ engine:
           #                      the model still sees the domain. Unmask restores
           #                      the full address on the way back regardless.
           config: {}  # Uses default patterns (email: full)
+    # Gemini route: Gemini models via an OpenAI-compatible aggregator endpoint
+    # (e.g. aihubmix / inferera), so request/response stay in OpenAI shape — no
+    # protocol translation needed (unlike Dify). Uses AIGIS_GEMINI_BASE_URL (/v1)
+    # + GEMINI_API_KEY.
+    - id: "gemini-default"
+      matcher:
+        model: "^gemini-.*"  # gemini-2.5-flash, gemini-2.0-flash, ...
+      upstream:
+        base_url: "env:AIGIS_GEMINI_BASE_URL"
+        path: "/chat/completions"
+        auth_strategy: "bearer"
+        token_env: "GEMINI_API_KEY"
+      transforms:
+        - type: "pii"
+          config: {}
     - id: "claude-proxy"
       matcher:
         model: "^(claude|glm).*"
