@@ -1,101 +1,19 @@
+# TODO — 待办
 
-问题1：可以让claude code 使用做代理地址
-  "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080/v1", 后收不到
+> 已完成项见 [`DONE.md`](DONE.md)。
 
+## A. 工程门面 / 开源标配（非功能，低风险）
+- [ ] **LICENSE** — 缺失，建议 MIT；无协议他人无法合法使用
+- [ ] **README** — "what is aigis" 章节为空，缺项目介绍 / 功能说明 / 架构图 / 安装方式
+- [ ] **CI/CD** — 无 `.github/workflows/`，建议加 `go build` + `go test` 自动化
+- [ ] **CONTRIBUTING.md** — 缺贡献指南
 
+## B. 功能方向（需确认是否要做 / 优先级）
+- [ ] **限流 / 熔断** — 目前并发监控只统计不限流（当初按 YAGNI 留口）
+- [ ] **响应缓存** — 相同请求短期缓存
+- [ ] **更多 provider 适配** — 现有 openai / gemini / claude(glm) / dify；可继续加（需原生格式的则参考 dify 翻译那套）
+- [ ] **脱敏增强** — `custom_rules` 已支持；可扩展：按 tag 选规则、按路由覆盖规则集
+- [ ] **dify `message_replace` 流式处理** — 当前丢弃（输出审核整体替换场景）；OpenAI 流式无法回撤已发 delta，需设计权衡
 
-问题2：provider 添加 openai dify cluade  ✅ 已完成（2026-06-26，dify 路由打通，见下）
-
-NEXT：
-1. 记录 敏感信息  ✅ 已完成（2026-06-26）
-2. 并发监控  ✅ 已完成（2026-06-26）
-3. 消息回溯（往回替换）  ✅ 已完成
-4. 邮箱脱敏可选策略（保留域名）  ✅ 已完成（2026-06-27）：
-   - `security.MaskOptions{EmailMode}`：`full`(默认,整封替换) / `local`(只替换 @ 前的 mailbox,保留 @domain)
-   - `Mask` 保持默认包装零破坏；email-local 按 `@` 切分,vault 只存 local,Unmask 自动重组完整邮箱(占位符紧贴 @domain)
-   - 配置驱动:PII transform 读 `config.email`;`config.yaml` dify 路由设 `email: "local"`
-   - 测试:scanner(full/local/子域名/unmask 还原) + pii transform(config 驱动);真机双证——echo 上游抓包确认发往上游为 `占位符@example.com`(域名保留、mailbox 脱敏) + 真实 dify 流式往返完整还原邮箱无泄漏
-
----
-
-## 已完成 (2026-06-26 下午) — 工程健壮性三件套
-
-### 1. 配置验证层
-- `EngineConfig.Validate(knownTransforms)`（`internal/core/engine/validate.go`）：路由非空、ID 唯一非空、matcher 正则合法、upstream base_url 非空、auth_strategy 合法（含 none/空）、transform 类型已知、必须存在 catch-all（空 matcher）路由
-- 在 `server.NewHTTPServer` 加载配置后、建 engine 前调用，**坏配置启动期即响亮报错**而非运行期误路由
-- transform 合法类型由 `transform.KnownTypes()` 注入，保持 engine 不反向依赖 transform 实现
-- 测试：`validate_test.go`（OK 用例 + 8 个失败模式表驱动 + none/空 auth）；修了 server/集成测试夹具补 catch-all
-
-### 2. dify / 多 provider 路由打通（已对真实 dify 实测 200）
-- `config.yaml` 启用 dify 路由，端点 `/chat-messages`（用户的 dify 是 chat/chatflow 类型，advanced-chat 模式）
-- **修正变量名**：初版误写 `token_env: DIFY_API_KEY` + 硬编码 base_url，与 .env 的 `AIGIS_DIFY_API_KEY` / `AIGIS_DIFY_BASE_URL` 不匹配 → 改用 `env:AIGIS_DIFY_BASE_URL` + `AIGIS_DIFY_API_KEY`
-- **template transform 加 `json` 函数**：JSON 转义 content，修复原模板 `{{...}}` 裸插值在内容含引号/换行时产出非法 JSON 的隐患；chat 形态 query 在顶层
-- **实测**：`dify-test` → `route_id: dify-workflow`，真实上游返回 200 + 完整 answer（env 解析/Bearer 鉴权/PII→模板→投递全链路确认）
-- **响应翻译已实现**：Route 新增 `response_transforms`（应用于非流式响应，先翻译后 unmask）；dify 路由配响应模板把 dify 原生响应 → OpenAI chat-completion 形态（object/choices/usage），实测响应体已是标准 OpenAI 结构
-- 现共 4 provider 路由：openai-default / claude-proxy / dify(chat) / fallback
-- 测试：`TestTemplateTransformDifyShape`（请求转义）+ `TestTemplateTransformDifyResponseToOpenAI`（响应翻译）；validate 同时校验 response_transforms 类型
-- **流式（SSE）响应的 dify→OpenAI 翻译** ✅ 已完成（2026-06-27）：
-  - 请求模板 `response_mode` 改为按客户端 `.stream` 切换（`{{if .stream}}streaming{{else}}blocking{{end}}`），dify 路由不再强制 blocking
-  - 新增 `transform.DifyStreamTranslator`（实现 `StreamTransformer`，Adapter）：dify SSE 事件流 → OpenAI `chat.completion.chunk` 流。`message`/`agent_message`→delta（首块带 role）、`message_end`→stop 块 + `[DONE]`；`ping`/`workflow_*`/`node_*`/`tts_message` 等丢弃；Flush 兜底保证上游中断也收尾
-  - 抽出 `carryUnmask`（组合，非继承）：占位符跨事件重组逻辑由 `StreamUnmasker` 与新 translator 共用，避免分叉
-  - 配置驱动选择：路由加 `stream_translate`（`config.yaml` dify 路由设 `"dify"`），`transform.NewStreamTransformer(name)` 工厂；空/`unmask` 仍走原透传（行为不变）
-  - validate 新增 `stream_translate` 已知值校验（注入 `transform.KnownStreamTranslators()`，坏值启动期报错）
-  - 测试：`dify_stream_test.go`（基础翻译/丢弃非答案事件/占位符跨两 message 还原/无 message_end 兜底）+ validate 新失败用例；transform & engine & server 全绿
-
-### 3. 日志滚动切割（可选，默认关闭）
-- **opt-in**：`log.rotate` 默认 false = 单文件（交给系统 logrotate）；设 true 才启用内置 lumberjack。二者勿同管一文件（logrotate 重命名/truncate 会与 lumberjack 的 fd 冲突）
-- `logger.go` 按 `RotationConfig.Enabled` 二分：关闭走原 `zap.Config` 单文件实现（`buildStaticLogger`），启用走手工 lumberjack 双 core（`buildRotatingLogger`）。编码器格式经 `configureEncoder` 共享，两路一致
-- 接入 lumberjack（`gopkg.in/natefinch/lumberjack.v2`）；弃用全局 `RegisterSink`（一次性注册会锁死配置 + 不可测）
-- 配置化：`config.yaml` `log.{rotate,file,max_size_mb,max_backups,max_age_days,compress}`，serve.go 逐项 viper 覆盖 `logger.DefaultRotation`
-- 保留 funcCore（函数名字段）与 caller skip 行为（实测 caller 字段正确无回归）
-- 测试：`rotation_test.go` 临时目录隔离——启用时 MaxSize=1MB 强制滚动断言产生 backup；关闭时同等负载断言仅单文件不滚动
-
-## 已完成 (2026-06-25)
-
-### 问题1 解决：Claude Code 代理打通
-- 注册 `/v1/messages` 端点（与 `/v1/chat/completions` 共用 handler，按 model 路由）
-- 实现 SSE 流式透传 `SendStream`（此前 `streaming not implemented` 正是“收不到”的根因）
-- claude-proxy 路由实测打通：mask → 转发 → 流式 unmask 还原
-- 已验证上游：GLM（智谱 `open.bigmodel.cn` anthropic 兼容端点），model `glm-4.6` / `glm-5.2`
-  - 配置见 `.env`（`AIGIS_ANTHROPIC_BASE_URL` / `AIGIS_ANTHROPIC_KEY`，ak 在 .env 不入库）
-  - `config.yaml` claude-proxy matcher 放宽为 `^(claude|glm).*`，认证走 `x-api-key`（header_policy.set `env:AIGIS_ANTHROPIC_KEY`）
-
-### NEXT#3 消息回溯（往回替换）= 双向 tokenization
-- 请求 Mask 入 vault、响应 Unmask 还原，OpenAI/Claude 双格式
-
-### Bug 修复：流式 unmask 跨-chunk 失效
-- 现象：占位符 `__AIGIS_SEC_xxx__` 被上游逐 token 拆到多个 SSE delta，逐行 unmask 无法重组 → 占位符泄漏给客户端
-- 修复：`transform.StreamUnmasker` 语义层重组（两层缓冲：SSE 事件 + 占位符前缀 carry），跨 delta 累积 unmask + splitSafe 前缀保留 + 空 delta 跳过
-- 二次修复：`partialPlaceholderRe` hex 上限由 `{0,11}` 改为 `{0,12}_{0,2}`
-  - 原因：完整 hash 是 12 位 hex，原正则在「hex 已满 12 位、尾 `__` 尚未到达」时匹配不到，会把整段当普通文本提前 flush 泄漏
-  - 新增 splitSafe 边界用例（12hex 缺尾 / 12hex+1下划线）锁定，实测 GLM 流式确认还原
-- 覆盖：transform 包单测（Claude/OpenAI 拆分用例 + splitSafe 边界）+ 端到端实测
-
-### 架构重构：转换引擎 Strategy 化
-- 新建 `internal/core/transform/`：Transformer 接口 + Registry，pii/field_map/template/unmask 各为独立策略
-- universal.go 大 switch → 数据驱动分发（OCP，加新转换无需改 Provider）
-
-### 配置/测试入口
-- `~/.claude/models/aigis.json`：指向 `http://127.0.0.1:8080`，用 `cm aigis` / `cmy aigis` 启动真实 Claude Code 走 AIGis
-- `tmp/test_claude_messages_stream.sh`：curl 流式 PII 回归脚本
-
-### 日志落盘
-- `internal/pkg/logger/logger.go`：输出同时写 stdout 和 `./logs/aigis.log`（自动 `os.MkdirAll` 建目录），`logs/` 已在 `.gitignore`
-- 未做滚动切割（YAGNI）；常驻运行需再加 lumberjack 按大小/天数切割
-
-### NEXT#1 记录敏感信息 = 脱敏审计追踪（2026-06-26）
-- 新增 `internal/core/audit` 包：发生脱敏的请求向 `./logs/audit.jsonl` 追加一条 JSONL（`request_id/trace_id/timestamp/model/route_id/total/by_type/items/duration_ms`）
-- 采集解耦：`Scanner.Mask` 命中时独立断言 `RecordDetection(type, placeholder, preview)`，不动既有 `vaultContext` 接口（现有 Mask 单测零破坏）
-- 记录粒度：**仅元数据 + 部分打码预览**（`maskPreview` 首2尾2中间`***`，≤4位全码，如 `te***om`）；**不落完整明文**；干净请求不写
-- 写入时机：`handleGateway` 单个 `defer auditor.Record(ctx)` 统一覆盖流式/非流式
-- 配置：`config.yaml` `audit.enabled`（缺省 true）；文件权限 `0o600`（含 preview 部分明文+指纹，比 aigis.log 敏感）
-- fail-loud：`Auditor` 注入 zap logger，marshal/write 失败 `log.Error` 带 request_id（不崩主请求但响亮留痕）
-- 代码评审处置见 `docs/CODE_REVIEW_audit_feature_2026-06-26.md`
-- 验证：单测（audit 5 用例 + maskPreview 表驱动）+ 真实 GLM 上游端到端（三类密钥脱敏、权限 600、无明文泄漏均实测确认）
-
-### NEXT#2 并发监控（2026-06-26）
-- 新增 `internal/core/metrics` 包：`sync/atomic` 无锁计数 in_flight / peak_concurrency / total / success / failed + uptime（监控，**不限流** YAGNI）
-- `handleGateway` 入口 `metrics.Begin()` + `defer End(succeeded)`，覆盖在途全生命周期；流式/非流式成功路径置 `succeeded=true`，早返回错误路径默认 failed
-- 新增 `GET /metrics` 端点返回 JSON snapshot
-- **踩坑修复**：成功判定变量原名 `ok`，被 `if flusher, ok := w.(http.Flusher)` 的 `:=` 遮蔽，导致流式成功被误记 failed；改名 `succeeded` 解决（实测 success=0→正确计数）
-- 验证：`go test -race` 并发单测（1000 goroutine，in_flight 归零、total/peak 正确）+ 真实 GLM 端到端（峰值在途 3、success/failed 分别计、非 POST 不计数均实测确认）
+## 待澄清 / 观察项
+- [ ] 日志 `upstream` 字段打印的是配置原值（如 `env:AIGIS_DIFY_BASE_URL`）而非解析后 URL —— 纯显示问题，不影响请求；要不要改成打印解析后 URL
