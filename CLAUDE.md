@@ -12,14 +12,12 @@ AIGis 是一个用 Go 语言开发的 AI 安全网关，提供对 AI/LLM 服务�
 
 项目采用模块化架构，核心组件包括：
 
-- **Provider 接口** ([`internal/core/provider.go`](internal/core/provider.go)): LLM 提供商适配器接口，定义了统一的模型请求和响应处理
-- **Processor 接口** ([`internal/core/processor.go`](internal/core/processor.go)): 中间件处理接口，支持请求/响应的拦截和修改
-- **Pipeline** ([`internal/core/pipeline.go`](internal/core/pipeline.go)): 处理器管道，按优先级执行多个处理器
-- **AIGisContext** ([`internal/core/context.go`](internal/core/context.go)): 扩展的上下文，支持线程安全的元数据存储
+- **Provider 接口** ([`internal/core/provider.go`](internal/core/provider.go)): LLM 提供商适配器接口，定义了统一的模型请求和响应处理；唯一实现 `UniversalProvider`（配置驱动）
+- **Engine** ([`internal/core/engine/`](internal/core/engine/)): 按请求体匹配路由（预编译正则），并在启动期校验配置
+- **Transform 策略** ([`internal/core/transform/`](internal/core/transform/)): 可插拔的请求/响应转换（pii / field_map / template / unmask）与流式翻译（StreamTransformer），真正的转换逻辑在此，不在中间件层
+- **AIGisContext** ([`internal/core/context.go`](internal/core/context.go)): 扩展的上下文，支持线程安全的元数据存储与脱敏 vault
 
-### 处理器实现
-
-- **PII Guard** ([`internal/core/processors/pii_guard.go`](internal/core/processors/pii_guard.go)): 个人身份信息检测和脱敏处理器
+> 注：早期的 `Pipeline`/`Processor` 中间件层已移除（仅用于日志、从不改 body 的死层）。请求日志改为 `handleGateway` 内联 + defer 收尾，转换统一走 Transform 策略。
 
 ### 服务层
 

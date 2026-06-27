@@ -20,7 +20,6 @@ import (
 	"aigis/internal/core/audit"
 	"aigis/internal/core/engine"
 	"aigis/internal/core/metrics"
-	"aigis/internal/core/processors"
 	"aigis/internal/core/providers"
 	"aigis/internal/core/transform"
 	"aigis/internal/pkg/logger"
@@ -29,12 +28,11 @@ import (
 // HTTPServer extends the basic server with gateway functionality
 type HTTPServer struct {
 	*Server
-	pipeline *core.Pipeline
-	engine   *engine.Engine
-	mux      *http.ServeMux
-	logger   *logger.Logger
-	auditor  *audit.Auditor
-	metrics  *metrics.Metrics
+	engine  *engine.Engine
+	mux     *http.ServeMux
+	logger  *logger.Logger
+	auditor *audit.Auditor
+	metrics *metrics.Metrics
 }
 
 // auditLogPath is the on-disk JSONL audit trail of masked sensitive info.
@@ -48,12 +46,6 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 
 	// Wrap zap logger with our extension
 	extLogger := logger.NewLogger(zapLogger)
-
-	// Initialize pipeline (for logging processor only, transforms are in engine)
-	pipeline := core.NewPipeline()
-
-	// Register RequestLogger processor
-	pipeline.AddProcessor(processors.NewRequestLogger())
 
 	// Load engine configuration
 	engineConfig, err := config.LoadEngineConfig()
@@ -98,12 +90,11 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 	)
 
 	s := &HTTPServer{
-		Server:   baseServer,
-		pipeline: pipeline,
-		engine:   eng,
-		logger:   extLogger,
-		auditor:  auditor,
-		metrics:  metrics.New(),
+		Server:  baseServer,
+		engine:  eng,
+		logger:  extLogger,
+		auditor: auditor,
+		metrics: metrics.New(),
 	}
 
 	// Initialize mux
@@ -225,16 +216,27 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	// was masked). Covers both streaming and blocking paths via a single defer.
 	defer s.auditor.Record(ctx)
 
-	// Execute the pipeline for request logging
-	processedBody, err := s.pipeline.ExecuteRequest(ctx, body)
-	if err != nil {
-		reqLogger.Error("Pipeline error", zap.Error(err))
-		http.Error(w, fmt.Sprintf("Pipeline error: %v", err), http.StatusInternalServerError)
-		return
-	}
+	// Log request completion with latency on every exit path (streaming included),
+	// reflecting the final success/failure outcome.
+	defer func() {
+		status := "Success"
+		if !succeeded {
+			status = "Failed"
+		}
+		reqLogger.Info("Request finished",
+			zap.Float64("latency_ms", float64(time.Since(ctx.StartTime).Microseconds())/1000),
+			zap.String("status", status),
+		)
+	}()
+
+	reqLogger.Info("Request started",
+		zap.String("method", r.Method),
+		zap.String("path", r.URL.Path),
+		zap.String("model", gjson.GetBytes(body, "model").String()),
+	)
 
 	// Find matching route using engine
-	route, err := s.engine.FindRoute(processedBody)
+	route, err := s.engine.FindRoute(body)
 	if err != nil {
 		reqLogger.Error("Route matching error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Route matching error: %v", err), http.StatusBadRequest)
@@ -254,14 +256,14 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 
 	// Stash routing metadata for the audit record (read in the deferred Record).
 	ctx.SetMetadata("route_id", route.ID)
-	ctx.SetMetadata("model", gjson.GetBytes(processedBody, "model").String())
+	ctx.SetMetadata("model", gjson.GetBytes(body, "model").String())
 
 	// Create universal provider for this route
 	provider := providers.NewUniversalProvider(route, reqLogger)
 
 	// Branch on streaming: clients set "stream": true to request SSE.
 	// The flusher must be available to stream; otherwise fall back to blocking.
-	isStream := gjson.GetBytes(processedBody, "stream").Bool()
+	isStream := gjson.GetBytes(body, "stream").Bool()
 	if flusher, ok := w.(http.Flusher); isStream && ok {
 		// SSE response headers
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -270,7 +272,7 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 
 		// Stream upstream SSE through, unmasking placeholders per chunk.
 		// Pass the AIGisContext (ctx) for bidirectional tokenization (vault).
-		if err := provider.SendStream(ctx, processedBody, r.Header, w, flusher); err != nil {
+		if err := provider.SendStream(ctx, body, r.Header, w, flusher); err != nil {
 			// If nothing has been written yet the status is still settable; otherwise
 			// the error is logged and the stream simply ends.
 			reqLogger.Error("Provider stream error", zap.Error(err))
@@ -285,24 +287,16 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 
 	// Send request through provider (includes transforms and header handling)
 	// Pass the AIGisContext (ctx) instead of r.Context() for bidirectional tokenization
-	resp, err := provider.Send(ctx, processedBody, r.Header)
+	resp, err := provider.Send(ctx, body, r.Header)
 	if err != nil {
 		reqLogger.Error("Provider error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Provider error: %v", err), http.StatusBadGateway)
 		return
 	}
 
-	// Execute the pipeline for response processing (logging)
-	finalResp, err := s.pipeline.ExecuteResponse(ctx, resp)
-	if err != nil {
-		reqLogger.Error("Response pipeline error", zap.Error(err))
-		http.Error(w, fmt.Sprintf("Response pipeline error: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Return the processed response
+	// Return the upstream response.
 	w.WriteHeader(http.StatusOK)
-	w.Write(finalResp)
+	w.Write(resp)
 	succeeded = true
 }
 
