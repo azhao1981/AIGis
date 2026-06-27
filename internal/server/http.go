@@ -19,6 +19,7 @@ import (
 	"aigis/internal/core"
 	"aigis/internal/core/audit"
 	"aigis/internal/core/breaker"
+	"aigis/internal/core/cache"
 	"aigis/internal/core/engine"
 	"aigis/internal/core/limiter"
 	"aigis/internal/core/metrics"
@@ -39,6 +40,7 @@ type HTTPServer struct {
 	scanner  *security.Scanner           // shared, built once with built-in + custom rules
 	limiter  *limiter.ConcurrencyLimiter // global in-flight cap (no-op when unconfigured)
 	breakers *breaker.Set                // per-route circuit breakers (no-op when disabled)
+	cache    *cache.TTLCache             // non-streaming response cache (no-op when disabled)
 }
 
 // auditLogPath is the on-disk JSONL audit trail of masked sensitive info.
@@ -121,6 +123,12 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 		zap.Duration("cooldown", breakerCfg.Cooldown),
 	)
 
+	cacheTTL := config.CacheTTL()
+	extLogger.Info("Response cache initialized",
+		zap.Duration("ttl", cacheTTL), // 0 = disabled
+		zap.Int("max_entries", config.CacheMaxEntries()),
+	)
+
 	s := &HTTPServer{
 		Server:   baseServer,
 		engine:   eng,
@@ -130,6 +138,7 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 		scanner:  scanner,
 		limiter:  limiter.New(maxConcurrent),
 		breakers: breaker.NewSet(breakerCfg),
+		cache:    cache.New(cacheTTL, config.CacheMaxEntries()),
 	}
 
 	// Initialize mux
@@ -306,6 +315,25 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	ctx.SetMetadata("route_id", route.ID)
 	ctx.SetMetadata("model", gjson.GetBytes(body, "model").String())
 
+	// Streaming intent (clients set "stream": true to request SSE).
+	isStream := gjson.GetBytes(body, "stream").Bool()
+
+	// Response cache (non-streaming only): serve an identical recent request
+	// without hitting the upstream. Checked BEFORE the breaker so a cache hit is
+	// neither blocked by an open circuit nor consumes a half-open probe slot.
+	var cacheKey string
+	if !isStream {
+		cacheKey = cache.Key(r.URL.Path, string(body))
+		if cached, ok := s.cache.Get(cacheKey); ok {
+			reqLogger.Info("Cache hit", zap.String("route_id", route.ID))
+			w.Header().Set("X-Cache", "HIT")
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(cached)
+			succeeded = true
+			return
+		}
+	}
+
 	// Circuit breaker: if this route's upstream is currently tripped open, fail
 	// fast with 503 instead of piling onto a sick backend (no-op when disabled).
 	br := s.breakers.Get(route.ID)
@@ -319,9 +347,8 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	// Create universal provider for this route
 	provider := providers.NewUniversalProvider(route, reqLogger, s.scanner)
 
-	// Branch on streaming: clients set "stream": true to request SSE.
-	// The flusher must be available to stream; otherwise fall back to blocking.
-	isStream := gjson.GetBytes(body, "stream").Bool()
+	// Branch on streaming: the flusher must be available to stream; otherwise
+	// fall back to blocking.
 	if flusher, ok := w.(http.Flusher); isStream && ok {
 		// SSE response headers
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -355,6 +382,12 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	br.RecordSuccess()
+
+	// Cache the fresh response for identical future (non-streaming) requests.
+	if cacheKey != "" {
+		s.cache.Set(cacheKey, resp)
+		w.Header().Set("X-Cache", "MISS")
+	}
 
 	// Return the upstream response.
 	w.WriteHeader(http.StatusOK)

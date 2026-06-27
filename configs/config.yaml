@@ -35,6 +35,14 @@ breaker:
   fail_threshold: 5
   cooldown_sec: 30
 
+# Response cache (non-streaming only). Identical requests within ttl_sec return
+# the previous response (X-Cache: HIT) instead of hitting the upstream. 0 =
+# disabled (default). Best for deterministic / low-sensitivity workloads — the
+# cache holds plaintext responses in memory, so keep ttl short.
+cache:
+  ttl_sec: 0
+  max_entries: 1000
+
 # Custom sensitive-info detection rules (optional). Each rule's pattern is a Go
 # regexp; matches are tokenized (masked->vault->unmasked) exactly like the
 # built-in rules (email/phone/keys). Invalid regex fails loud at startup.

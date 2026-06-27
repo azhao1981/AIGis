@@ -111,6 +111,18 @@ func MaxConcurrent() int {
 	return viper.GetInt("limit.max_concurrent")
 }
 
+// CacheTTL returns the response-cache TTL from `cache.ttl_sec`. 0 (or absent)
+// disables the cache.
+func CacheTTL() time.Duration {
+	return time.Duration(viper.GetInt("cache.ttl_sec")) * time.Second
+}
+
+// CacheMaxEntries returns the cache entry cap from `cache.max_entries`
+// (0/absent → the cache package default).
+func CacheMaxEntries() int {
+	return viper.GetInt("cache.max_entries")
+}
+
 // LoadCustomRules loads user-defined sensitive-info detection rules from the
 // `security.custom_rules` config section. Returns nil when the key is absent.
 func LoadCustomRules() ([]security.CustomRule, error) {

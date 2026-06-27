@@ -6,6 +6,21 @@
 
 ## 2026-06-27
 
+### 响应缓存（非流式，TTL）
+- 新增 `internal/core/cache`：`TTLCache`（per-entry TTL + 硬上限 max_entries，`ttl<=0` 禁用=默认，可注入时钟）`Get/Set` + `Key`(sha256)
+- `handleGateway` 非流式路径：cache.Get **在 breaker 之前**（命中不占 half-open 探针、不被 open 电路挡）→ `X-Cache: HIT` 直返；MISS 时 provider 成功后 `Set` + `X-Cache: MISS`。流式不缓存
+- key = `sha256(path + body)`；缓存最终 unmask 响应（相同请求体→相同 PII→一致），故内存含明文，TTL 宜短、opt-in
+- `config.yaml` `cache.{ttl_sec,max_entries}`（默认 0=禁用，零行为变更）
+- 验证：cache 单测含 `-race`（命中/禁用/过期/容量上限/key 确定性）+ 真机 e2e（同请求两次：MISS 打上游→HIT 不打上游，命中数不增）
+
+### 脱敏增强：PII transform 按路由选规则子集
+- PII transform config 加 `rules`（规则名逗号分隔，如 `"Email,Mobile Phone"`），复用 `Scanner.Mask` 已有 tags 机制（按 rule.Name 筛选），空=全部
+- 每条路由可独立选择脱敏哪些类型；新增 `parseTags` + 单测（仅选中规则被脱敏，其余透传）
+
+### dify 流式处理 message_replace 事件
+- `DifyStreamTranslator` 不再丢弃 `message_replace`（输出审核改写答案）：把替换内容作为 delta surface 给客户端
+- 注释说明：流式无法回撤已发 delta（原内容已在线上），强审核/可回撤场景应用 blocking 模式；新增单测
+
 ### per-route 熔断 (circuit breaker)
 - 新增 `internal/core/breaker`：三态机 `Breaker`（Closed/Open/HalfOpen）+ `Set`(per-route，按 route.ID) + 可注入时钟
 - `handleGateway` 路由后 `Allow()` 失败→**HTTP 503 + Retry-After**（不打上游）；provider 调用后 `RecordSuccess/Failure`（流式+非流式两路）
