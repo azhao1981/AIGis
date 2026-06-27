@@ -5,10 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 
+	"aigis/internal/core/breaker"
 	"aigis/internal/core/engine"
 	"aigis/internal/core/security"
 )
@@ -82,6 +84,25 @@ func AuditEnabled() bool {
 		return true
 	}
 	return viper.GetBool("audit.enabled")
+}
+
+// BreakerConfig returns the per-route circuit-breaker config from the `breaker`
+// section. Disabled by default; fail_threshold/cooldown_sec fall back to sane
+// defaults (5 / 30s) when absent or non-positive.
+func BreakerConfig() breaker.Config {
+	ft := viper.GetInt("breaker.fail_threshold")
+	if ft <= 0 {
+		ft = 5
+	}
+	cd := viper.GetInt("breaker.cooldown_sec")
+	if cd <= 0 {
+		cd = 30
+	}
+	return breaker.Config{
+		Enabled:       viper.GetBool("breaker.enabled"),
+		FailThreshold: ft,
+		Cooldown:      time.Duration(cd) * time.Second,
+	}
 }
 
 // MaxConcurrent returns the configured global in-flight request ceiling from

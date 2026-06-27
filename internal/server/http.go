@@ -18,6 +18,7 @@ import (
 	"aigis/internal/config"
 	"aigis/internal/core"
 	"aigis/internal/core/audit"
+	"aigis/internal/core/breaker"
 	"aigis/internal/core/engine"
 	"aigis/internal/core/limiter"
 	"aigis/internal/core/metrics"
@@ -30,13 +31,14 @@ import (
 // HTTPServer extends the basic server with gateway functionality
 type HTTPServer struct {
 	*Server
-	engine  *engine.Engine
-	mux     *http.ServeMux
-	logger  *logger.Logger
-	auditor *audit.Auditor
-	metrics *metrics.Metrics
-	scanner *security.Scanner           // shared, built once with built-in + custom rules
-	limiter *limiter.ConcurrencyLimiter // global in-flight cap (no-op when unconfigured)
+	engine   *engine.Engine
+	mux      *http.ServeMux
+	logger   *logger.Logger
+	auditor  *audit.Auditor
+	metrics  *metrics.Metrics
+	scanner  *security.Scanner           // shared, built once with built-in + custom rules
+	limiter  *limiter.ConcurrencyLimiter // global in-flight cap (no-op when unconfigured)
+	breakers *breaker.Set                // per-route circuit breakers (no-op when disabled)
 }
 
 // auditLogPath is the on-disk JSONL audit trail of masked sensitive info.
@@ -112,14 +114,22 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 		zap.Int("max_concurrent", maxConcurrent), // 0 = unlimited
 	)
 
+	breakerCfg := config.BreakerConfig()
+	extLogger.Info("Circuit breaker initialized",
+		zap.Bool("enabled", breakerCfg.Enabled),
+		zap.Int("fail_threshold", breakerCfg.FailThreshold),
+		zap.Duration("cooldown", breakerCfg.Cooldown),
+	)
+
 	s := &HTTPServer{
-		Server:  baseServer,
-		engine:  eng,
-		logger:  extLogger,
-		auditor: auditor,
-		metrics: metrics.New(),
-		scanner: scanner,
-		limiter: limiter.New(maxConcurrent),
+		Server:   baseServer,
+		engine:   eng,
+		logger:   extLogger,
+		auditor:  auditor,
+		metrics:  metrics.New(),
+		scanner:  scanner,
+		limiter:  limiter.New(maxConcurrent),
+		breakers: breaker.NewSet(breakerCfg),
 	}
 
 	// Initialize mux
@@ -296,6 +306,16 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	ctx.SetMetadata("route_id", route.ID)
 	ctx.SetMetadata("model", gjson.GetBytes(body, "model").String())
 
+	// Circuit breaker: if this route's upstream is currently tripped open, fail
+	// fast with 503 instead of piling onto a sick backend (no-op when disabled).
+	br := s.breakers.Get(route.ID)
+	if !br.Allow() {
+		reqLogger.Warn("Circuit open, failing fast", zap.String("route_id", route.ID))
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "Upstream temporarily unavailable (circuit open)", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Create universal provider for this route
 	provider := providers.NewUniversalProvider(route, reqLogger, s.scanner)
 
@@ -314,8 +334,10 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 			// If nothing has been written yet the status is still settable; otherwise
 			// the error is logged and the stream simply ends.
 			reqLogger.Error("Provider stream error", zap.Error(err))
+			br.RecordFailure()
 		} else {
 			succeeded = true
+			br.RecordSuccess()
 		}
 		return
 	}
@@ -327,10 +349,12 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	// Pass the AIGisContext (ctx) instead of r.Context() for bidirectional tokenization
 	resp, err := provider.Send(ctx, body, r.Header)
 	if err != nil {
+		br.RecordFailure()
 		reqLogger.Error("Provider error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Provider error: %v", err), http.StatusBadGateway)
 		return
 	}
+	br.RecordSuccess()
 
 	// Return the upstream response.
 	w.WriteHeader(http.StatusOK)

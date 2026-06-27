@@ -6,6 +6,13 @@
 
 ## 2026-06-27
 
+### per-route 熔断 (circuit breaker)
+- 新增 `internal/core/breaker`：三态机 `Breaker`（Closed/Open/HalfOpen）+ `Set`(per-route，按 route.ID) + 可注入时钟
+- `handleGateway` 路由后 `Allow()` 失败→**HTTP 503 + Retry-After**（不打上游）；provider 调用后 `RecordSuccess/Failure`（流式+非流式两路）
+- 机制：连续失败达 `fail_threshold` → Open（`cooldown_sec` 内 503 快速失败）→ 冷却后 Half-Open 放单个探针 → 成功转 Closed / 失败再 Open；per-route 隔离
+- `config.yaml` `breaker.{enabled,fail_threshold,cooldown_sec}`，默认 disabled(零行为变更)，缺省 5/30s
+- 验证：breaker 单测含 `-race`（开断/半开恢复/探针失败重开/disabled no-op/per-key 隔离）+ 真机 e2e（失败上游，阈值触发 503、**开断后上游命中数不增**、冷却后探针恢复）
+
 ### 全局并发限流 (limit.max_concurrent)
 - 新增 `internal/core/limiter`：`ConcurrencyLimiter`（CAS 原子计数，`max=0` 不限=默认）`Acquire/Release/InFlight`
 - `handleGateway` 入口 `Acquire` 失败→**HTTP 429 + Retry-After**，`defer Release` 覆盖所有返回路径（含流式）；在读 body 前做，过载早卸载

@@ -27,6 +27,14 @@ audit:
 limit:
   max_concurrent: 0
 
+# Per-route circuit breaker. When an upstream fails fail_threshold times in a
+# row, that route's circuit opens and returns HTTP 503 for cooldown_sec; then it
+# lets one probe through (half-open) and closes on success. Disabled by default.
+breaker:
+  enabled: false
+  fail_threshold: 5
+  cooldown_sec: 30
+
 # Custom sensitive-info detection rules (optional). Each rule's pattern is a Go
 # regexp; matches are tokenized (masked->vault->unmasked) exactly like the
 # built-in rules (email/phone/keys). Invalid regex fails loud at startup.
