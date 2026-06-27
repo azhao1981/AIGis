@@ -1,6 +1,8 @@
 package transform
 
 import (
+	"strings"
+
 	"github.com/bytedance/sonic"
 	"github.com/bytedance/sonic/ast"
 
@@ -31,14 +33,33 @@ func (t *PIITransform) Apply(ctx *core.AIGisContext, body []byte, config map[str
 	// "email" config selects email tokenization: "local" preserves the domain,
 	// anything else (incl. empty) tokenizes the whole address.
 	opts := security.MaskOptions{EmailMode: config["email"]}
+	// "rules" config selects which detection rules apply on this route (by rule
+	// name, comma-separated, e.g. "Email,Mobile Phone"). Empty = all rules.
+	tags := parseTags(config["rules"])
 	if t.format == formatClaude {
-		return t.applyClaude(ctx, body, opts)
+		return t.applyClaude(ctx, body, tags, opts)
 	}
-	return t.applyOpenAI(ctx, body, opts)
+	return t.applyOpenAI(ctx, body, tags, opts)
+}
+
+// parseTags splits a comma-separated rule-name list into trimmed, non-empty
+// tags. Returns nil for an empty string, which Mask treats as "all rules".
+func parseTags(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	tags := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			tags = append(tags, t)
+		}
+	}
+	return tags
 }
 
 // applyOpenAI redacts messages[].content string fields (OpenAI chat format).
-func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, opts security.MaskOptions) ([]byte, error) {
+func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, tags []string, opts security.MaskOptions) ([]byte, error) {
 	root, err := sonic.Get(body)
 	if err != nil {
 		return body, nil // Return original if parse fails
@@ -75,7 +96,7 @@ func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, opts sec
 			continue
 		}
 
-		newContent := t.scanner.MaskWithOptions(ctx, contentStr, nil, opts)
+		newContent := t.scanner.MaskWithOptions(ctx, contentStr, tags, opts)
 		if newContent != contentStr {
 			msgNode.Set("content", ast.NewString(newContent))
 		}
@@ -87,9 +108,9 @@ func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, opts sec
 
 // applyClaude redacts the top-level "system" string and messages[].content,
 // where content can be a string or an array of typed blocks (Claude format).
-func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte, opts security.MaskOptions) ([]byte, error) {
+func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte, tags []string, opts security.MaskOptions) ([]byte, error) {
 	redact := func(s string) string {
-		return t.scanner.MaskWithOptions(ctx, s, nil, opts)
+		return t.scanner.MaskWithOptions(ctx, s, tags, opts)
 	}
 
 	root, err := sonic.Get(body)

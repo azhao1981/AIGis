@@ -71,7 +71,11 @@ engine:
           #   "local"          — tokenize only the local part, keep "@domain" so
           #                      the model still sees the domain. Unmask restores
           #                      the full address on the way back regardless.
-          config: {}  # Uses default patterns (email: full)
+          # config.rules — comma-separated rule names to apply on THIS route
+          #   (e.g. "Email,Mobile Phone"); omit/empty = all rules. Built-in names:
+          #   Private Key / AWS Access Key / OpenAI API Key / GitHub Token /
+          #   Google API Key / Email / Mobile Phone (+ any custom_rules names).
+          config: {}  # Uses default patterns (all rules, email: full)
     # Gemini route: Gemini models via an OpenAI-compatible aggregator endpoint
     # (e.g. aihubmix / inferera), so request/response stay in OpenAI shape — no
     # protocol translation needed (unlike Dify). Uses AIGIS_GEMINI_BASE_URL (/v1)

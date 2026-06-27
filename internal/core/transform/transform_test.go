@@ -64,6 +64,27 @@ func TestPIITransformEmailLocalConfig(t *testing.T) {
 	}
 }
 
+func TestPIITransformRulesSubset(t *testing.T) {
+	scanner := security.NewScanner()
+	tr := &PIITransform{name: TypePII, format: formatOpenAI, scanner: scanner}
+	ctx := newCtx()
+
+	// Only "Mobile Phone" selected: phone is masked, email passes through.
+	body := `{"messages":[{"role":"user","content":"mail alice@example.com phone 13800138000"}]}`
+	out, err := tr.Apply(ctx, []byte(body), map[string]string{"rules": "Mobile Phone"})
+	if err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	got := string(out)
+	if strings.Contains(got, "13800138000") {
+		t.Errorf("selected rule (phone) should be masked: %s", got)
+	}
+	if !strings.Contains(got, "alice@example.com") {
+		t.Errorf("unselected rule (email) should pass through: %s", got)
+	}
+}
+
 func TestPIITransformClaude(t *testing.T) {
 	scanner := security.NewScanner()
 	tr := &PIITransform{name: TypePIIClaude, format: formatClaude, scanner: scanner}
