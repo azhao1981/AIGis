@@ -1,49 +1,75 @@
+# AIGis
 
-## what is aigis
+English | [简体中文](README.zh-CN.md)
 
+## What is AIGis
 
-## 使用方式
+AIGis is an AI security gateway written in Go that provides access control and data processing for AI/LLM services.
 
-### 启动服务 (默认 0.0.0.0:8080)
-  ./bin/aigis serve
+## Usage
 
-### 指定端口
-  ./bin/aigis serve -p 3000
+### Start the server (default 0.0.0.0:8080)
 
-### 使用环境变量
-  AIGIS_SERVER_PORT=9000 ./bin/aigis serve
+```bash
+./bin/aigis serve
+```
 
-### 使用自定义配置文件
-  ./bin/aigis --config /path/to/config.yaml serve
+### Specify a port
 
-  配置优先级
+```bash
+./bin/aigis serve -p 3000
+```
 
-  环境变量 (AIGIS_*) > 命令行参数 > config.yaml
+### Use environment variables
 
-## 项目结构
+```bash
+AIGIS_SERVER_PORT=9000 ./bin/aigis serve
+```
+
+### Use a custom config file
+
+```bash
+./bin/aigis --config /path/to/config.yaml serve
+```
+
+Configuration precedence:
+
+```
+environment variables (AIGIS_*) > command-line flags > config.yaml
+```
+
+## Project Structure
 
 ```bash
   aigis/
-  ├── bin/aigis               # 编译产物
+  ├── bin/aigis               # build artifact
   ├── cmd/aigis/
-  │   ├── main.go              # 入口
-  │   ├── root.go              # Cobra 根命令 + Viper 配置
-  │   └── serve.go             # serve 子命令
+  │   ├── main.go              # entry point
+  │   ├── root.go              # Cobra root command + Viper config
+  │   └── serve.go             # serve subcommand
   ├── internal/
   │   ├── core/
-  │   │   ├── context.go       # GatewayContext (线程安全 metadata)
-  │   │   ├── provider.go      # Provider 接口 (LLM 适配器)
-  │   │   └── processor.go     # Processor 接口 (中间件)
+  │   │   ├── context.go       # GatewayContext (thread-safe metadata)
+  │   │   ├── provider.go      # Provider interface (LLM adapter)
+  │   │   └── processor.go     # Processor interface (middleware)
   │   └── server/
-  │       └── server.go        # HTTP 服务器 (graceful shutdown)
+  │       └── server.go        # HTTP server (graceful shutdown)
   ├── configs/
-  │   └── config.yaml          # 默认配置
+  │   └── config.yaml          # default config
   ├── go.mod
   └── go.sum
 ```
 
-## test
+## Test
 
 ```bash
 go test -v ./tests/...
 ```
+
+## License
+
+This project is open-sourced under the **GNU AGPLv3** license, see [`LICENSE`](LICENSE).
+
+Personal, research, and internal-evaluation use is free under the AGPLv3 terms. If you intend to use AIGis in closed-source / SaaS scenarios without complying with the AGPLv3 source-disclosure obligations, please see [`COMMERCIAL.md`](COMMERCIAL.md) for a commercial license.
+
+Before contributing, please read and agree to the [`CLA.md`](CLA.md).
