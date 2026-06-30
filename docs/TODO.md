@@ -3,9 +3,9 @@
 > 已完成项见 [`DONE.md`](DONE.md)。
 
 ## A. 工程门面 / 开源标配（非功能，低风险）
-- [ ] **LICENSE** — 缺失，建议 MIT；无协议他人无法合法使用
-- [ ] **README** — "what is aigis" 章节为空，缺项目介绍 / 功能说明 / 架构图 / 安装方式
-- [ ] **CI/CD** — 无 `.github/workflows/`，建议加 `go build` + `go test` 自动化
+- [x] **LICENSE** — AGPLv3 双授权（LICENSE + COMMERCIAL.md + CLA.md）
+- [x] **README** — 补充项目介绍 + 拆分中英双语（README.md / README.zh-CN.md）
+- [x] **CI/CD** — 已加 `.github/workflows/ci.yml`（build + vet + test）
 - [ ] **CONTRIBUTING.md** — 缺贡献指南
 
 ## B. 功能方向（需确认是否要做 / 优先级）
