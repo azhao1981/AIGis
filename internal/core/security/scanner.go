@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Rule 定义了敏感信息检测规则
@@ -141,11 +142,25 @@ func (s *Scanner) Mask(ctx interface{}, input string, tags []string) string {
 
 // MaskWithOptions is Mask with explicit tokenization options (see MaskOptions).
 func (s *Scanner) MaskWithOptions(ctx interface{}, input string, tags []string, opts MaskOptions) string {
+	return s.MaskWithExtraRules(ctx, input, tags, opts, nil)
+}
+
+// MaskWithExtraRules is MaskWithOptions plus per-call extra rules appended after
+// the scanner's shared rules. The extra rules are route-scoped (e.g. a PII
+// transform's own custom_rules) and never mutate the shared scanner, so it stays
+// immutable and concurrency-safe. Extra rules tokenize exactly like built-ins.
+func (s *Scanner) MaskWithExtraRules(ctx interface{}, input string, tags []string, opts MaskOptions, extra []Rule) string {
 	// ctx should be *core.AIGisContext, but we use interface{} to avoid circular
 	// import; we type-assert the vault/audit methods below.
 
 	result := input
-	for _, rule := range s.rules {
+	rules := s.rules
+	if len(extra) > 0 {
+		rules = make([]Rule, 0, len(s.rules)+len(extra))
+		rules = append(rules, s.rules...)
+		rules = append(rules, extra...)
+	}
+	for _, rule := range rules {
 		// Check if this rule should be applied based on tags
 		if len(tags) > 0 {
 			shouldApply := false
@@ -239,6 +254,47 @@ type CustomRule struct {
 	Pattern string `mapstructure:"pattern"`
 }
 
+// ruleReplacement derives the bracketed replacement label for a rule name,
+// e.g. "Order ID" -> "[ORDER_ID_REDACTED]". Shared by built-in custom rules and
+// route-scoped extra rules so both render identically.
+func ruleReplacement(name string) string {
+	return "[" + strings.ToUpper(strings.ReplaceAll(name, " ", "_")) + "_REDACTED]"
+}
+
+// compiledRuleCache memoizes compiled route-scoped rules by "name\x00pattern"
+// so per-request CompileRules calls don't re-compile the same regex every time
+// (transforms are built per request).
+var compiledRuleCache sync.Map // map[string]Rule
+
+// CompileRules turns user-defined CustomRules into compiled Rules, reusing a
+// process-wide cache keyed by name+pattern. It returns an error if a rule has an
+// empty name or an invalid regexp. Intended for route-scoped rules passed to
+// MaskWithExtraRules; it does NOT mutate any shared scanner.
+func CompileRules(custom []CustomRule) ([]Rule, error) {
+	if len(custom) == 0 {
+		return nil, nil
+	}
+	out := make([]Rule, 0, len(custom))
+	for i, r := range custom {
+		if r.Name == "" {
+			return nil, fmt.Errorf("custom rule #%d has an empty name", i)
+		}
+		key := r.Name + "\x00" + r.Pattern
+		if cached, ok := compiledRuleCache.Load(key); ok {
+			out = append(out, cached.(Rule))
+			continue
+		}
+		compiled, err := regexp.Compile(r.Pattern)
+		if err != nil {
+			return nil, fmt.Errorf("custom rule %q: %w", r.Name, err)
+		}
+		rule := Rule{Name: r.Name, Pattern: compiled, Replacement: ruleReplacement(r.Name)}
+		compiledRuleCache.Store(key, rule)
+		out = append(out, rule)
+	}
+	return out, nil
+}
+
 // NewScannerWithRules builds a scanner with the built-in rules plus the given
 // custom rules appended. It returns an error if a custom rule has an empty name
 // or an invalid regexp, so a bad config fails loud at startup instead of
@@ -249,8 +305,7 @@ func NewScannerWithRules(custom []CustomRule) (*Scanner, error) {
 		if r.Name == "" {
 			return nil, fmt.Errorf("custom rule #%d has an empty name", i)
 		}
-		replacement := "[" + strings.ToUpper(strings.ReplaceAll(r.Name, " ", "_")) + "_REDACTED]"
-		if err := s.AddRule(r.Name, r.Pattern, replacement); err != nil {
+		if err := s.AddRule(r.Name, r.Pattern, ruleReplacement(r.Name)); err != nil {
 			return nil, fmt.Errorf("custom rule %q: %w", r.Name, err)
 		}
 	}

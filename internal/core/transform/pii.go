@@ -1,6 +1,7 @@
 package transform
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/bytedance/sonic"
@@ -36,10 +37,32 @@ func (t *PIITransform) Apply(ctx *core.AIGisContext, body []byte, config map[str
 	// "rules" config selects which detection rules apply on this route (by rule
 	// name, comma-separated, e.g. "Email,Mobile Phone"). Empty = all rules.
 	tags := parseTags(config["rules"])
-	if t.format == formatClaude {
-		return t.applyClaude(ctx, body, tags, opts)
+	// "custom_rules" config adds route-scoped detection rules on top of the
+	// shared scanner (JSON array of {name, pattern}). They apply only to this
+	// route and never mutate the shared scanner.
+	extra, err := parseCustomRules(config["custom_rules"])
+	if err != nil {
+		return nil, err
 	}
-	return t.applyOpenAI(ctx, body, tags, opts)
+	if t.format == formatClaude {
+		return t.applyClaude(ctx, body, tags, opts, extra)
+	}
+	return t.applyOpenAI(ctx, body, tags, opts, extra)
+}
+
+// parseCustomRules parses the optional "custom_rules" config value (a JSON array
+// of {name, pattern} objects) into compiled, route-scoped rules. An empty value
+// yields no rules; invalid JSON or a bad regex returns an error so a
+// misconfigured route fails loud rather than silently skipping redaction.
+func parseCustomRules(s string) ([]security.Rule, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var defs []security.CustomRule
+	if err := sonic.Unmarshal([]byte(s), &defs); err != nil {
+		return nil, fmt.Errorf("invalid custom_rules JSON: %w", err)
+	}
+	return security.CompileRules(defs)
 }
 
 // parseTags splits a comma-separated rule-name list into trimmed, non-empty
@@ -59,7 +82,7 @@ func parseTags(s string) []string {
 }
 
 // applyOpenAI redacts messages[].content string fields (OpenAI chat format).
-func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, tags []string, opts security.MaskOptions) ([]byte, error) {
+func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, tags []string, opts security.MaskOptions, extra []security.Rule) ([]byte, error) {
 	root, err := sonic.Get(body)
 	if err != nil {
 		return body, nil // Return original if parse fails
@@ -96,7 +119,7 @@ func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, tags []s
 			continue
 		}
 
-		newContent := t.scanner.MaskWithOptions(ctx, contentStr, tags, opts)
+		newContent := t.scanner.MaskWithExtraRules(ctx, contentStr, tags, opts, extra)
 		if newContent != contentStr {
 			msgNode.Set("content", ast.NewString(newContent))
 		}
@@ -108,9 +131,9 @@ func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, tags []s
 
 // applyClaude redacts the top-level "system" string and messages[].content,
 // where content can be a string or an array of typed blocks (Claude format).
-func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte, tags []string, opts security.MaskOptions) ([]byte, error) {
+func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte, tags []string, opts security.MaskOptions, extra []security.Rule) ([]byte, error) {
 	redact := func(s string) string {
-		return t.scanner.MaskWithOptions(ctx, s, tags, opts)
+		return t.scanner.MaskWithExtraRules(ctx, s, tags, opts, extra)
 	}
 
 	root, err := sonic.Get(body)

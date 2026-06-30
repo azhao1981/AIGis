@@ -85,6 +85,73 @@ func TestPIITransformRulesSubset(t *testing.T) {
 	}
 }
 
+func TestPIITransformCustomRules(t *testing.T) {
+	scanner := security.NewScanner()
+	tr := &PIITransform{name: TypePII, format: formatOpenAI, scanner: scanner}
+	ctx := newCtx()
+
+	// A route-scoped custom rule masks an order ID the built-in rules don't know.
+	cfg := map[string]string{
+		"custom_rules": `[{"name":"Order ID","pattern":"ORD-[0-9]+"}]`,
+	}
+	body := `{"messages":[{"role":"user","content":"my order ORD-12345 and mail alice@example.com"}]}`
+	out, err := tr.Apply(ctx, []byte(body), cfg)
+	if err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	got := string(out)
+	if strings.Contains(got, "ORD-12345") {
+		t.Errorf("route-scoped custom rule should mask order ID: %s", got)
+	}
+	if strings.Contains(got, "alice@example.com") {
+		t.Errorf("built-in email rule should still apply: %s", got)
+	}
+	if len(ctx.VaultGetAll()) != 2 {
+		t.Errorf("expected 2 vault entries (order + email), got %d", len(ctx.VaultGetAll()))
+	}
+}
+
+func TestPIITransformCustomRulesScoped(t *testing.T) {
+	scanner := security.NewScanner()
+	tr := &PIITransform{name: TypePII, format: formatOpenAI, scanner: scanner}
+
+	body := `{"messages":[{"role":"user","content":"order ORD-12345"}]}`
+
+	// With the custom rule the order ID is masked.
+	out1, err := tr.Apply(newCtx(), []byte(body), map[string]string{
+		"custom_rules": `[{"name":"Order ID","pattern":"ORD-[0-9]+"}]`,
+	})
+	if err != nil {
+		t.Fatalf("Apply with rule failed: %v", err)
+	}
+	if strings.Contains(string(out1), "ORD-12345") {
+		t.Errorf("order ID should be masked when rule present: %s", out1)
+	}
+
+	// A later request WITHOUT the rule must NOT mask it: the rule is route-scoped
+	// and must not have leaked into the shared scanner.
+	out2, err := tr.Apply(newCtx(), []byte(body), nil)
+	if err != nil {
+		t.Fatalf("Apply without rule failed: %v", err)
+	}
+	if !strings.Contains(string(out2), "ORD-12345") {
+		t.Errorf("custom rule leaked into shared scanner: %s", out2)
+	}
+}
+
+func TestPIITransformCustomRulesInvalid(t *testing.T) {
+	scanner := security.NewScanner()
+	tr := &PIITransform{name: TypePII, format: formatOpenAI, scanner: scanner}
+
+	body := `{"messages":[{"role":"user","content":"hi"}]}`
+	if _, err := tr.Apply(newCtx(), []byte(body), map[string]string{
+		"custom_rules": `[{"name":"Bad","pattern":"["}]`,
+	}); err == nil {
+		t.Error("expected error for invalid custom_rules regex, got nil")
+	}
+}
+
 func TestPIITransformClaude(t *testing.T) {
 	scanner := security.NewScanner()
 	tr := &PIITransform{name: TypePIIClaude, format: formatClaude, scanner: scanner}
