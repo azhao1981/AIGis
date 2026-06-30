@@ -273,11 +273,7 @@ func (p *UniversalProvider) buildUpstreamRequest(ctx context.Context, body []byt
 	upstream := p.route.Upstream
 
 	// Build base URL (support env:VAR syntax)
-	baseURL := upstream.BaseURL
-	if len(baseURL) >= 4 && baseURL[:4] == "env:" {
-		envVar := baseURL[4:]
-		baseURL = os.Getenv(envVar)
-	}
+	baseURL := upstream.ResolvedBaseURL()
 
 	// Build URL
 	path := upstream.Path

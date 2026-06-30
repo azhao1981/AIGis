@@ -1,5 +1,10 @@
 package engine
 
+import (
+	"os"
+	"strings"
+)
+
 // EngineConfig defines the configuration for the transformation engine
 type EngineConfig struct {
 	Routes []Route `mapstructure:"routes"`
@@ -48,6 +53,17 @@ type Upstream struct {
 	TokenEnv string `mapstructure:"token_env"`
 	// HeaderName is the header name for "header" auth strategy (default: "Authorization")
 	HeaderName string `mapstructure:"header_name"`
+}
+
+// ResolvedBaseURL returns BaseURL with the "env:VAR" syntax resolved to the
+// environment variable's value. A plain URL is returned unchanged. This is the
+// single source of truth for both request building and logging, so logs show
+// the real upstream rather than the raw "env:..." config value.
+func (u Upstream) ResolvedBaseURL() string {
+	if envVar, ok := strings.CutPrefix(u.BaseURL, "env:"); ok {
+		return os.Getenv(envVar)
+	}
+	return u.BaseURL
 }
 
 // TransformStep defines a single transformation in the pipeline

@@ -81,7 +81,7 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 	for _, route := range engineConfig.Routes {
 		extLogger.Info("Route configured",
 			zap.String("id", route.ID),
-			zap.String("upstream", route.Upstream.BaseURL),
+			zap.String("upstream", route.Upstream.ResolvedBaseURL()),
 			zap.Int("transforms", len(route.Transforms)),
 		)
 	}
@@ -308,7 +308,7 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 
 	reqLogger.Info("Route matched",
 		zap.String("route_id", route.ID),
-		zap.String("upstream", route.Upstream.BaseURL),
+		zap.String("upstream", route.Upstream.ResolvedBaseURL()),
 	)
 
 	// Stash routing metadata for the audit record (read in the deferred Record).

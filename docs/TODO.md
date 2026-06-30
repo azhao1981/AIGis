@@ -14,4 +14,4 @@
 - [ ] **流式强审核** — dify message_replace 已 surface 替换内容，但流式无法回撤已发 delta；强审核场景的 blocking 自动降级可考虑
 
 ## 待澄清 / 观察项
-- [ ] 日志 `upstream` 字段打印的是配置原值（如 `env:AIGIS_DIFY_BASE_URL`）而非解析后 URL —— 纯显示问题，不影响请求；要不要改成打印解析后 URL
+- [x] 日志 `upstream` 字段改为打印解析后 URL —— 抽 `Upstream.ResolvedBaseURL()` 统一 env: 解析，日志与请求共用同一来源
