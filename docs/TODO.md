@@ -6,7 +6,7 @@
 - [x] **LICENSE** — AGPLv3 双授权（LICENSE + COMMERCIAL.md + CLA.md）
 - [x] **README** — 补充项目介绍 + 拆分中英双语（README.md / README.zh-CN.md）
 - [x] **CI/CD** — 已加 `.github/workflows/ci.yml`（build + vet + test）
-- [ ] **CONTRIBUTING.md** — 缺贡献指南
+- [x] **CONTRIBUTING.md** — 已加中英双语贡献指南（CLA + PR 清单 + 提交规范）
 
 ## B. 功能方向（需确认是否要做 / 优先级）
 - [ ] **更多 provider 适配** — 现有 openai / gemini / claude(glm) / dify；可继续加（需原生格式的则参考 dify 翻译那套）
