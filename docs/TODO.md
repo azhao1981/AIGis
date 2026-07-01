@@ -9,7 +9,9 @@
 - [x] **CONTRIBUTING.md** — 已加中英双语贡献指南（CLA + PR 清单 + 提交规范）
 
 ## B. 功能方向（需确认是否要做 / 优先级）
-- [ ] **更多 provider 适配** — 现有 openai / gemini / claude(glm) / dify；可继续加（需原生格式的则参考 dify 翻译那套）
+- [x] **更多 provider 适配（兼容类）** — OpenAI 兼容清单已交付：config.yaml 注释态示例（DeepSeek/Qwen/Kimi）+ README 中英兼容表。剩余按需：
+  - [ ] Azure OpenAI legacy（需 `?api-version=` query 注入 + `api-key` 头），留到真有 Azure 用户再做
+  - [ ] Anthropic 原生 `/v1/messages` / Bedrock SigV4（需原生翻译，参考 dify 那套），按需再做
 - [x] **脱敏增强（进阶）** — per-route 额外自定义规则（transform `custom_rules`，进程级编译缓存，不污染共享 scanner）
 - [x] **流式强审核** — 路由 `force_block`：stream 请求内部降级为 blocking，脱敏后做 egress 泄露复检（内置规则漏网即拒发），客户端仍收到伪流式 SSE
 
