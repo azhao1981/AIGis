@@ -34,6 +34,7 @@ type Record struct {
 	RequestID  string         `json:"request_id"`
 	TraceID    string         `json:"trace_id"`
 	Timestamp  string         `json:"timestamp"` // RFC3339
+	Tenant     string         `json:"tenant,omitempty"`
 	Model      string         `json:"model,omitempty"`
 	RouteID    string         `json:"route_id,omitempty"`
 	Total      int            `json:"total"`
@@ -95,6 +96,7 @@ func (a *Auditor) Record(ctx *core.AIGisContext) {
 		RequestID:  ctx.RequestID,
 		TraceID:    ctx.TraceID,
 		Timestamp:  now.Format(time.RFC3339),
+		Tenant:     ctx.Tenant,
 		Total:      len(detections),
 		ByType:     byType,
 		Items:      items,

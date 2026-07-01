@@ -12,6 +12,8 @@ import (
 	"github.com/spf13/viper"
 
 	"aigis/ee/auth"
+	"aigis/ee/billing"
+	eequota "aigis/ee/quota"
 	"aigis/internal/config"
 	"aigis/internal/pkg/logger"
 	"aigis/internal/server"
@@ -83,6 +85,30 @@ var serveCmd = &cobra.Command{
 			globalLogger.Sugar().Warn("EE auth NOT configured (ee.auth.api_keys empty) — gateway is open")
 		}
 
+		// --- Enterprise layer: usage metering / billing ---
+		// Persist usage to PostgreSQL/TimescaleDB when a DSN is configured;
+		// otherwise fall back to the in-memory sink (aggregate + log only).
+		if dsn := viper.GetString("ee.billing.dsn"); dsn != "" {
+			pgSink, err := billing.NewPostgresSink(cmd.Context(), dsn, globalLogger)
+			if err != nil {
+				return fmt.Errorf("failed to init billing store: %w", err)
+			}
+			defer pgSink.Close()
+			srv.SetUsageSink(pgSink)
+			globalLogger.Sugar().Info("EE billing: usage persisted to PostgreSQL")
+		} else {
+			srv.SetUsageSink(billing.NewMeteringSink(globalLogger))
+			globalLogger.Sugar().Warn("EE billing: ee.billing.dsn not set — usage kept in memory only")
+		}
+
+		// --- Enterprise layer: per-tenant quota / rate limiting ---
+		// Enforce a per-tenant in-flight ceiling when configured (0 = unlimited).
+		perTenant, defLimit := quotaConfig()
+		if defLimit > 0 || len(perTenant) > 0 {
+			srv.SetQuotaLimiter(eequota.NewConcurrencyLimiter(perTenant, defLimit))
+			globalLogger.Sugar().Infof("EE quota enabled: default=%d, per-tenant overrides=%d", defLimit, len(perTenant))
+		}
+
 		return srv.Start()
 	},
 }
@@ -90,6 +116,35 @@ var serveCmd = &cobra.Command{
 // apiKeys reads the "ee.auth.api_keys" config section: a map of apiKey -> tenant.
 func apiKeys() map[string]string {
 	return viper.GetStringMapString("ee.auth.api_keys")
+}
+
+// quotaConfig reads per-tenant concurrency limits from config:
+//
+//	ee.quota.default            -> fallback max in-flight per tenant (0 = unlimited)
+//	ee.quota.per_tenant.<name>  -> explicit override for one tenant
+//
+// It returns the per-tenant override map and the default ceiling.
+func quotaConfig() (perTenant map[string]int, def int) {
+	def = viper.GetInt("ee.quota.default")
+	perTenant = make(map[string]int)
+	for tenant, v := range viper.GetStringMap("ee.quota.per_tenant") {
+		perTenant[tenant] = cast(v)
+	}
+	return perTenant, def
+}
+
+// cast coerces a viper config value to an int, tolerating int/float/string.
+func cast(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
 }
 
 func init() {

@@ -24,8 +24,10 @@ import (
 	"aigis/internal/core/limiter"
 	"aigis/internal/core/metrics"
 	"aigis/internal/core/providers"
+	"aigis/internal/core/quota"
 	"aigis/internal/core/security"
 	"aigis/internal/core/transform"
+	"aigis/internal/core/usage"
 	"aigis/internal/pkg/logger"
 )
 
@@ -41,6 +43,16 @@ type HTTPServer struct {
 	limiter  *limiter.ConcurrencyLimiter // global in-flight cap (no-op when unconfigured)
 	breakers *breaker.Set                // per-route circuit breakers (no-op when disabled)
 	cache    *cache.TTLCache             // non-streaming response cache (no-op when disabled)
+
+	// usageSink receives one usage.Event per request. Defaults to usage.NopSink
+	// in the open-source build; the Enterprise Edition injects a metering/billing
+	// sink via SetUsageSink(). Never nil.
+	usageSink usage.Sink
+
+	// quota gates requests per tenant after auth. Defaults to quota.AllowAll (no
+	// rejection) in the open-source build; the Enterprise Edition injects a
+	// per-tenant limiter via SetQuotaLimiter(). Never nil.
+	quota quota.Limiter
 
 	// middlewares wrap the mux (auth, quota, ...). Empty in the open-source build;
 	// the Enterprise Edition registers its own via Use(). See middleware.go.
@@ -134,21 +146,44 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 	)
 
 	s := &HTTPServer{
-		Server:   baseServer,
-		engine:   eng,
-		logger:   extLogger,
-		auditor:  auditor,
-		metrics:  metrics.New(),
-		scanner:  scanner,
-		limiter:  limiter.New(maxConcurrent),
-		breakers: breaker.NewSet(breakerCfg),
-		cache:    cache.New(cacheTTL, config.CacheMaxEntries()),
+		Server:    baseServer,
+		engine:    eng,
+		logger:    extLogger,
+		auditor:   auditor,
+		metrics:   metrics.New(),
+		scanner:   scanner,
+		limiter:   limiter.New(maxConcurrent),
+		breakers:  breaker.NewSet(breakerCfg),
+		cache:     cache.New(cacheTTL, config.CacheMaxEntries()),
+		usageSink: usage.NopSink{},
+		quota:     quota.AllowAll(),
 	}
 
 	// Initialize mux
 	s.mux = s.setupRoutes()
 
 	return s, nil
+}
+
+// SetUsageSink replaces the per-request usage sink. The open-source build uses
+// usage.NopSink; the Enterprise Edition calls this from cmd/aigis-ee to plug in
+// a metering/billing sink. A nil sink resets to the no-op. Call before Start().
+func (s *HTTPServer) SetUsageSink(sink usage.Sink) {
+	if sink == nil {
+		sink = usage.NopSink{}
+	}
+	s.usageSink = sink
+}
+
+// SetQuotaLimiter replaces the per-tenant quota limiter. The open-source build
+// uses quota.AllowAll (never rejects); the Enterprise Edition calls this from
+// cmd/aigis-ee to enforce per-tenant limits. A nil limiter resets to allow-all.
+// Call before Start().
+func (s *HTTPServer) SetQuotaLimiter(q quota.Limiter) {
+	if q == nil {
+		q = quota.AllowAll()
+	}
+	s.quota = q
 }
 
 // setupRoutes creates and configures the HTTP routes
@@ -269,14 +304,55 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		zap.String("trace_id", traceID),
 	)
 
+	// Adopt the authenticated tenant, if any. In the open-source build no inbound
+	// auth runs, so this is empty; the Enterprise auth middleware stashes it via
+	// core.WithTenant so logging, audit, and quota can be scoped per tenant.
+	if id, ok := core.TenantFromContext(r.Context()); ok {
+		reqLogger = reqLogger.With(
+			zap.String("tenant", id.Tenant),
+			zap.String("subject", id.Subject),
+		)
+	}
+
 	// Create a GatewayContext
 	ctx := core.NewGatewayContext(r.Context(), reqLogger.Logger)
 	ctx.RequestID = requestID
 	ctx.TraceID = traceID
+	if id, ok := core.TenantFromContext(r.Context()); ok {
+		ctx.Tenant = id.Tenant
+		ctx.Subject = id.Subject
+	}
+
+	// Per-tenant quota gate (after auth, before any upstream work). No-op in the
+	// open-source build (quota.AllowAll); the Enterprise limiter rejects a tenant
+	// that is over its ceiling with 429. Release frees the slot at request end.
+	if release, ok := s.quota.Acquire(ctx.Tenant); ok {
+		defer release()
+	} else {
+		reqLogger.Warn("Tenant quota exceeded", zap.String("tenant", ctx.Tenant))
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Tenant quota exceeded", http.StatusTooManyRequests)
+		return
+	}
 
 	// Audit masked sensitive info at request end (metadata only; no-op if nothing
 	// was masked). Covers both streaming and blocking paths via a single defer.
 	defer s.auditor.Record(ctx)
+
+	// Usage metering: emit exactly one usage.Event per request at the end,
+	// regardless of exit path. Fields captured by closure are filled in as the
+	// request progresses (route, streaming intent, token counts from the upstream
+	// response). No-op in the open-source build (usage.NopSink).
+	usageEvt := usage.Event{
+		Tenant:    ctx.Tenant,
+		Subject:   ctx.Subject,
+		RequestID: requestID,
+	}
+	defer func() {
+		usageEvt.Success = succeeded
+		usageEvt.DurationMS = time.Since(ctx.StartTime).Milliseconds()
+		s.usageSink.Record(r.Context(), usageEvt)
+	}()
 
 	// Log request completion with latency on every exit path (streaming included),
 	// reflecting the final success/failure outcome.
@@ -323,6 +399,10 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	// Streaming intent (clients set "stream": true to request SSE).
 	isStream := gjson.GetBytes(body, "stream").Bool()
 
+	usageEvt.RouteID = route.ID
+	usageEvt.Model = gjson.GetBytes(body, "model").String()
+	usageEvt.Streamed = isStream
+
 	// Response cache (non-streaming only): serve an identical recent request
 	// without hitting the upstream. Checked BEFORE the breaker so a cache hit is
 	// neither blocked by an open circuit nor consumes a half-open probe slot.
@@ -334,6 +414,7 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Cache", "HIT")
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(cached)
+			applyUsageTokens(&usageEvt, cached)
 			succeeded = true
 			return
 		}
@@ -404,6 +485,7 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "data: %s\n\n", resp)
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
+		applyUsageTokens(&usageEvt, resp)
 		succeeded = true
 		return
 	}
@@ -431,7 +513,30 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	// Return the upstream response.
 	w.WriteHeader(http.StatusOK)
 	w.Write(resp)
+	applyUsageTokens(&usageEvt, resp)
 	succeeded = true
+}
+
+// applyUsageTokens fills the token counts on a usage.Event from an upstream
+// response body, tolerating both the OpenAI shape ("usage.prompt_tokens",
+// "usage.completion_tokens", "usage.total_tokens") and the Anthropic shape
+// ("usage.input_tokens", "usage.output_tokens"). Missing fields stay 0.
+func applyUsageTokens(e *usage.Event, resp []byte) {
+	prompt := gjson.GetBytes(resp, "usage.prompt_tokens")
+	if !prompt.Exists() {
+		prompt = gjson.GetBytes(resp, "usage.input_tokens")
+	}
+	completion := gjson.GetBytes(resp, "usage.completion_tokens")
+	if !completion.Exists() {
+		completion = gjson.GetBytes(resp, "usage.output_tokens")
+	}
+	e.PromptTokens = int(prompt.Int())
+	e.CompletionTokens = int(completion.Int())
+	if total := gjson.GetBytes(resp, "usage.total_tokens"); total.Exists() {
+		e.TotalTokens = int(total.Int())
+	} else {
+		e.TotalTokens = e.PromptTokens + e.CompletionTokens
+	}
 }
 
 // handleMetrics returns a JSON snapshot of concurrency counters for monitoring.

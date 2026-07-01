@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"aigis/internal/core"
 	"aigis/internal/server"
 )
 
@@ -38,7 +39,11 @@ func Middleware(p AuthProvider) server.Middleware {
 				return
 			}
 
+			// Stash under the ee-local key (for FromContext) and, crucially,
+			// under the core key so the OSS gateway handler can scope logging,
+			// audit, and quota per tenant without importing ee.
 			ctx := context.WithValue(r.Context(), tenantKey{}, principal)
+			ctx = core.WithTenant(ctx, core.TenantIdentity{Tenant: principal.Tenant, Subject: principal.Subject})
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

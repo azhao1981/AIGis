@@ -13,6 +13,14 @@ type AIGisContext struct {
 	context.Context
 	RequestID string
 	UserID    string
+	// Tenant identifies the authenticated tenant for this request. Empty in the
+	// open-source build (no inbound auth); the Enterprise auth layer populates it
+	// (via WithTenant / TenantFromContext below) so audit, logging, and quota can
+	// be scoped per tenant. Set once at request start, read-only thereafter.
+	Tenant string
+	// Subject is the authenticated principal (e.g. the API key id) within Tenant.
+	// Empty in the open-source build.
+	Subject   string
 	TraceID   string
 	StartTime time.Time
 	Log       *zap.Logger
@@ -109,6 +117,35 @@ func (c *AIGisContext) Detections() []Detection {
 	out := make([]Detection, len(c.detections))
 	copy(out, c.detections)
 	return out
+}
+
+// tenantCtxKey is the private key under which the authenticated tenant identity
+// is stashed in a standard context.Context. It lives in core (not ee/) so the
+// open-source gateway handler can read the value the Enterprise auth middleware
+// writes, without core ever importing ee — preserving the one-way ee → core
+// dependency rule.
+type tenantCtxKey struct{}
+
+// TenantIdentity is the minimal, license-boundary-safe identity that the
+// Enterprise auth layer passes to the core handler through the request context.
+type TenantIdentity struct {
+	Tenant  string
+	Subject string
+}
+
+// WithTenant returns a child context carrying the given tenant identity. The
+// Enterprise auth middleware calls this so the core gateway handler can later
+// recover the tenant via TenantFromContext and stamp it onto the AIGisContext.
+func WithTenant(ctx context.Context, id TenantIdentity) context.Context {
+	return context.WithValue(ctx, tenantCtxKey{}, id)
+}
+
+// TenantFromContext extracts the tenant identity stashed by WithTenant. The
+// second return value is false when no tenant is present (e.g. the open-source
+// build, or an unauthenticated path).
+func TenantFromContext(ctx context.Context) (TenantIdentity, bool) {
+	id, ok := ctx.Value(tenantCtxKey{}).(TenantIdentity)
+	return id, ok
 }
 
 // VaultGetAll returns a copy of all vault mappings (thread-safe)
