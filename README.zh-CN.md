@@ -62,6 +62,34 @@ make build      # 生成 ./bin/aigis
 
 以上路由的可用示例均在 [`configs/config.yaml`](configs/config.yaml) 中(OpenAI 兼容那几个默认注释掉了,取消注释并设置对应 `*_API_KEY` 即可)。
 
+## 快速上手
+
+启动网关后，以 OpenAI 格式向它发请求即可。prompt 里的敏感数据（邮箱、手机号、
+API Key 等）在请求离开网关前会被脱敏，返回时再还原：
+
+```bash
+# 1. 为默认 gpt-* 路由设置上游 Key 并启动网关
+export AIGIS_OPENAI_API_KEY=sk-your-real-key
+./bin/aigis serve
+
+# 2. 另开一个终端，像调用 OpenAI API 一样调用它
+curl -s http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [
+      {"role": "user", "content": "我的邮箱是 alice@example.com，手机号是 13800138000，帮我拟一封回信。"}
+    ]
+  }'
+```
+
+上游实际收到的是脱敏后的内容：`我的邮箱是 [EMAIL_REDACTED]，手机号是
+[PHONE_REDACTED]，...` —— 占位符会在返回给客户端的回复里还原成原值。模型全程
+看不到明文 PII，而客户端仍能得到连贯的回答。
+
+每次触发脱敏的请求都会向 `./logs/audit.jsonl` 追加一行「仅元数据」记录（规则 +
+计数，无明文）。
+
 ## 使用方式
 
 ### 启动服务 (默认 0.0.0.0:8080)
@@ -93,6 +121,9 @@ AIGIS_SERVER_PORT=9000 ./bin/aigis serve
 ```
 环境变量 (AIGIS_*) > 命令行参数 > config.yaml
 ```
+
+每个配置节、路由模型以及脱敏工作方式，详见
+[配置指南](docs/CONFIGURATION.zh-CN.md)。
 
 ## 项目结构
 

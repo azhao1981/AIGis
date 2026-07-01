@@ -62,6 +62,36 @@ Clients always speak the **OpenAI `/chat/completions`** shape to AIGis; the gate
 
 Ready-to-use route examples for all of the above are in [`configs/config.yaml`](configs/config.yaml) (the OpenAI-compatible ones are commented out — uncomment and set the matching `*_API_KEY`).
 
+## Quick Start
+
+Start the gateway, then send an OpenAI-style request to it. Sensitive data in the
+prompt (email, phone, API keys, ...) is masked before the request leaves the
+gateway, and restored in the response on the way back:
+
+```bash
+# 1. Set the upstream key for the default gpt-* route and start the gateway
+export AIGIS_OPENAI_API_KEY=sk-your-real-key
+./bin/aigis serve
+
+# 2. In another terminal, call it like the OpenAI API
+curl -s http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [
+      {"role": "user", "content": "My email is alice@example.com and my phone is 13800138000. Help me draft a reply."}
+    ]
+  }'
+```
+
+What the upstream actually receives (masked): `My email is [EMAIL_REDACTED] and
+my phone is [PHONE_REDACTED]. ...` — the placeholders are un-masked back to the
+original values in the reply returned to the client, so the model never sees the
+raw PII but your client still gets a coherent answer.
+
+Every masked request appends one metadata-only line (rule + counts, no
+plaintext) to `./logs/audit.jsonl`.
+
 ## Usage
 
 ### Start the server (default 0.0.0.0:8080)
@@ -93,6 +123,9 @@ Configuration precedence:
 ```
 environment variables (AIGIS_*) > command-line flags > config.yaml
 ```
+
+For every config section, the routing model, and how masking works, see the
+[Configuration Guide](docs/CONFIGURATION.md).
 
 ## Project Structure
 
