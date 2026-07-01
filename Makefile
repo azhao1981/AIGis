@@ -38,13 +38,21 @@ check-go:
 .PHONY: all
 all: check-go clean build
 
-# 构建
+# 构建（开源版，不含 ee/）
 .PHONY: build
 build:
 	@echo "构建 $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
 	$(GO) build $(BUILD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/aigis
 	@echo "构建完成: $(BUILD_DIR)/$(BINARY_NAME)"
+
+# 构建企业版（core + ee/，受 ee/LICENSE 约束）
+.PHONY: build-ee
+build-ee:
+	@echo "构建 $(BINARY_NAME)-ee (Enterprise)..."
+	@mkdir -p $(BUILD_DIR)
+	$(GO) build $(BUILD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-ee ./cmd/aigis-ee
+	@echo "构建完成: $(BUILD_DIR)/$(BINARY_NAME)-ee"
 
 # 停止服务
 .PHONY: kill

@@ -1,0 +1,29 @@
+AIGis Enterprise Edition License
+================================
+
+Copyright (c) AIGis authors. All rights reserved.
+
+This directory ("ee/") and all files within it are the Enterprise Edition of
+AIGis. They are SOURCE-AVAILABLE but NOT open source: the source is published
+for transparency and evaluation only.
+
+Unlike the rest of the repository (which is licensed under the GNU AGPLv3), the
+code in this directory is proprietary. You may NOT use, copy, modify, deploy,
+distribute, or run it in any environment — production, staging, or otherwise —
+without a valid AIGis commercial (Enterprise) license from the copyright holder.
+
+Permitted, without a commercial license:
+  - Reading the source.
+  - Building it locally strictly to evaluate AIGis, on a non-production machine.
+
+Prohibited, without a commercial license:
+  - Any production or commercial use.
+  - Providing AIGis Enterprise features as a service to third parties.
+  - Redistribution of this directory or binaries built from it.
+
+For a commercial license, see COMMERCIAL.md at the repository root, or contact
+the maintainers.
+
+The AGPLv3 that governs the open-source core (everything OUTSIDE this "ee/"
+directory) does NOT apply to the files in this directory. See LICENSING.md at the
+repository root for the exact boundary.

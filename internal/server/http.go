@@ -41,6 +41,10 @@ type HTTPServer struct {
 	limiter  *limiter.ConcurrencyLimiter // global in-flight cap (no-op when unconfigured)
 	breakers *breaker.Set                // per-route circuit breakers (no-op when disabled)
 	cache    *cache.TTLCache             // non-streaming response cache (no-op when disabled)
+
+	// middlewares wrap the mux (auth, quota, ...). Empty in the open-source build;
+	// the Enterprise Edition registers its own via Use(). See middleware.go.
+	middlewares []Middleware
 }
 
 // auditLogPath is the on-disk JSONL audit trail of masked sensitive info.
@@ -176,16 +180,17 @@ func (s *HTTPServer) setupRoutes() *http.ServeMux {
 	return mux
 }
 
-// Handler returns the HTTP handler for testing
+// Handler returns the HTTP handler (mux wrapped by any registered middlewares)
+// for testing and embedding.
 func (s *HTTPServer) Handler() http.Handler {
-	return s.mux
+	return s.buildHandler()
 }
 
 // Start starts the HTTP server with gateway endpoints
 func (s *HTTPServer) Start() error {
 	s.server = &http.Server{
 		Addr:         s.addr,
-		Handler:      s.mux,
+		Handler:      s.buildHandler(),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
