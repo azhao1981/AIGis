@@ -16,8 +16,11 @@ GOTEST=go test
 # 检查 Go 版本
 GO_VERSION := $(shell $(GO) version | grep -o 'go[0-9]\+\.[0-9]\+' | sed 's/go//')
 
+# 版本（优先取 git tag，回退到 commit 短哈希）
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
 # 构建标志
-LDFLAGS=-ldflags "-s -w"
+LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
 BUILD_FLAGS=-v $(LDFLAGS)
 
 # 检查 Go 版本

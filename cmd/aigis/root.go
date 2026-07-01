@@ -11,10 +11,20 @@ import (
 
 var cfgFile string
 
+var version = "dev"
+
 var rootCmd = &cobra.Command{
 	Use:   "aigis",
 	Short: "AI Security Gateway",
 	Long:  `AI Security Gateway - A high-performance gateway for AI/LLM services.`,
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print the version number",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println("aigis", version)
+	},
 }
 
 func Execute() {
@@ -30,4 +40,6 @@ func SetupRootCmd() {
 	})
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./configs/config.yaml)")
+
+	rootCmd.AddCommand(versionCmd)
 }
