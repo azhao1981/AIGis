@@ -9,6 +9,7 @@ logs
 .vscode
 .claude
 .codegraph
+docs/CALL_GRAPH.md
 bin
 .go-version
 

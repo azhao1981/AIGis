@@ -6,6 +6,39 @@
 
 AIGis 是一个用 Go 语言开发的 AI 安全网关,为 AI/LLM 服务提供访问控制和数据处理。
 
+## 安装
+
+### 下载预编译二进制
+
+从 [最新 release](https://github.com/azhao1981/AIGis/releases/latest) 下载对应平台的压缩包:
+
+```bash
+# 示例: Linux amd64
+VERSION=v0.1.0
+curl -fsSL -o aigis.tar.gz \
+  "https://github.com/azhao1981/AIGis/releases/download/${VERSION}/aigis_${VERSION}_linux_amd64.tar.gz"
+
+# 校验 checksum (可选, 推荐)
+curl -fsSL -O "https://github.com/azhao1981/AIGis/releases/download/${VERSION}/SHA256SUMS"
+sha256sum -c SHA256SUMS --ignore-missing
+
+tar -xzf aigis.tar.gz
+./aigis version
+```
+
+可用压缩包: `linux_amd64`、`linux_arm64`、`darwin_amd64`、`darwin_arm64`、`windows_amd64` (`.zip`)。
+
+### 从源码构建
+
+需要 Go 1.25 (1.23 / 1.24 亦可):
+
+```bash
+git clone https://github.com/azhao1981/AIGis.git
+cd AIGis
+make build      # 生成 ./bin/aigis
+./bin/aigis version
+```
+
 ## 支持的 Provider
 
 客户端始终以 **OpenAI `/chat/completions`** 格式访问 AIGis;网关脱敏后转发给上游。Provider 分两类:

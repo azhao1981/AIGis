@@ -6,6 +6,39 @@ English | [简体中文](README.zh-CN.md)
 
 AIGis is an AI security gateway written in Go that provides access control and data processing for AI/LLM services.
 
+## Install
+
+### Download a pre-built binary
+
+Grab the archive for your platform from the [latest release](https://github.com/azhao1981/AIGis/releases/latest):
+
+```bash
+# Example: Linux amd64
+VERSION=v0.1.0
+curl -fsSL -o aigis.tar.gz \
+  "https://github.com/azhao1981/AIGis/releases/download/${VERSION}/aigis_${VERSION}_linux_amd64.tar.gz"
+
+# Verify the checksum (optional but recommended)
+curl -fsSL -O "https://github.com/azhao1981/AIGis/releases/download/${VERSION}/SHA256SUMS"
+sha256sum -c SHA256SUMS --ignore-missing
+
+tar -xzf aigis.tar.gz
+./aigis version
+```
+
+Available archives: `linux_amd64`, `linux_arm64`, `darwin_amd64`, `darwin_arm64`, `windows_amd64` (`.zip`).
+
+### Build from source
+
+Requires Go 1.25 (1.23 / 1.24 also supported):
+
+```bash
+git clone https://github.com/azhao1981/AIGis.git
+cd AIGis
+make build      # produces ./bin/aigis
+./bin/aigis version
+```
+
 ## Supported Providers
 
 Clients always speak the **OpenAI `/chat/completions`** shape to AIGis; the gateway masks PII and forwards to the upstream. Providers fall into two groups:
