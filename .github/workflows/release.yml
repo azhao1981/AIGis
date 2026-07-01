@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build & Release
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -51,17 +51,37 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           NAME="aigis_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
           mkdir -p "dist"
-          cp README.md LICENSE configs/config.yaml . 2>/dev/null || true
           if [ "${{ matrix.goos }}" = "windows" ]; then
             zip "dist/${NAME}.zip" aigis.exe README.md LICENSE
           else
             tar -czf "dist/${NAME}.tar.gz" aigis README.md LICENSE
           fi
+          cd dist
+          sha256sum * > "SHA256SUMS_${{ matrix.goos }}_${{ matrix.goarch }}.part"
 
-      - name: Checksums
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 1
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Merge checksums
         run: |
           cd dist
-          sha256sum * > "SHA256SUMS_${{ matrix.goos }}_${{ matrix.goarch }}.txt"
+          cat *.part | sort -k2 > SHA256SUMS && rm -f *.part
 
       - name: Release
         uses: softprops/action-gh-release@v2
