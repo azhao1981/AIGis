@@ -6,6 +6,29 @@
 
 AIGis 是一个用 Go 语言开发的 AI 安全网关,为 AI/LLM 服务提供访问控制和数据处理。
 
+## 支持的 Provider
+
+客户端始终以 **OpenAI `/chat/completions`** 格式访问 AIGis;网关脱敏后转发给上游。Provider 分两类:
+
+**OpenAI 兼容** — 无需协议翻译,把 `base_url` 指向厂商端点、匹配 model 前缀即可新增路由:
+
+| Provider | Base URL | Model 前缀 | Token 环境变量 |
+|----------|----------|-----------|----------------|
+| OpenAI | `https://api.openai.com/v1` | `gpt-*` | `OPENAI_API_KEY` |
+| Gemini(经兼容端点) | `env:AIGIS_GEMINI_BASE_URL` | `gemini-*` | `GEMINI_API_KEY` |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-*` | `DEEPSEEK_API_KEY` |
+| 通义千问(DashScope) | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen*` | `DASHSCOPE_API_KEY` |
+| Moonshot / Kimi | `https://api.moonshot.ai/v1` | `moonshot*` / `kimi*` | `MOONSHOT_API_KEY` |
+
+**协议翻译** — 请求/响应经 transform 重塑:
+
+| Provider | Path | 说明 |
+|----------|------|------|
+| Anthropic Claude / GLM | `/messages` | `x-api-key` 头鉴权 + `pii_claude` transform |
+| Dify | `/chat-messages` | 模板重塑 + `dify` 流式翻译器 |
+
+以上路由的可用示例均在 [`configs/config.yaml`](configs/config.yaml) 中(OpenAI 兼容那几个默认注释掉了,取消注释并设置对应 `*_API_KEY` 即可)。
+
 ## 使用方式
 
 ### 启动服务 (默认 0.0.0.0:8080)

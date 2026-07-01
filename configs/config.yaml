@@ -99,6 +99,50 @@ engine:
       transforms:
         - type: "pii"
           config: {}
+    # ---------------------------------------------------------------------------
+    # OpenAI-compatible providers (DeepSeek / Qwen / Moonshot-Kimi, ...)
+    # These upstreams speak the OpenAI /chat/completions shape verbatim, so NO
+    # protocol translation is needed — just point base_url at the vendor endpoint
+    # and match the model prefix. PII masking applies exactly like the routes
+    # above. Uncomment the ones you use and set the corresponding *_API_KEY env.
+    # See the compatibility table in README for endpoints/model prefixes.
+    # ---------------------------------------------------------------------------
+    # - id: "deepseek"
+    #   matcher:
+    #     model: "^deepseek-.*"          # deepseek-chat, deepseek-reasoner, ...
+    #   upstream:
+    #     base_url: "https://api.deepseek.com/v1"
+    #     path: "/chat/completions"
+    #     auth_strategy: "bearer"
+    #     token_env: "DEEPSEEK_API_KEY"
+    #   transforms:
+    #     - type: "pii"
+    #       config: {}
+    # - id: "qwen"
+    #   matcher:
+    #     model: "^qwen.*"               # qwen-max, qwen-plus, qwen3-*, ...
+    #   upstream:
+    #     # Alibaba DashScope OpenAI-compatible endpoint (intl); CN users may use
+    #     # https://dashscope.aliyuncs.com/compatible-mode/v1
+    #     base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    #     path: "/chat/completions"
+    #     auth_strategy: "bearer"
+    #     token_env: "DASHSCOPE_API_KEY"
+    #   transforms:
+    #     - type: "pii"
+    #       config: {}
+    # - id: "moonshot-kimi"
+    #   matcher:
+    #     model: "^(moonshot|kimi).*"    # kimi-k2, moonshot-v1-*, ...
+    #   upstream:
+    #     # Global endpoint; CN users may use https://api.moonshot.cn/v1
+    #     base_url: "https://api.moonshot.ai/v1"
+    #     path: "/chat/completions"
+    #     auth_strategy: "bearer"
+    #     token_env: "MOONSHOT_API_KEY"
+    #   transforms:
+    #     - type: "pii"
+    #       config: {}
     - id: "claude-proxy"
       matcher:
         model: "^(claude|glm).*"

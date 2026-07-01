@@ -6,6 +6,29 @@ English | [简体中文](README.zh-CN.md)
 
 AIGis is an AI security gateway written in Go that provides access control and data processing for AI/LLM services.
 
+## Supported Providers
+
+Clients always speak the **OpenAI `/chat/completions`** shape to AIGis; the gateway masks PII and forwards to the upstream. Providers fall into two groups:
+
+**OpenAI-compatible** — no protocol translation, add a route by pointing `base_url` at the vendor endpoint and matching the model prefix:
+
+| Provider | Base URL | Model prefix | Token env |
+|----------|----------|--------------|-----------|
+| OpenAI | `https://api.openai.com/v1` | `gpt-*` | `OPENAI_API_KEY` |
+| Gemini (via compatible endpoint) | `env:AIGIS_GEMINI_BASE_URL` | `gemini-*` | `GEMINI_API_KEY` |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-*` | `DEEPSEEK_API_KEY` |
+| Qwen (DashScope) | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen*` | `DASHSCOPE_API_KEY` |
+| Moonshot / Kimi | `https://api.moonshot.ai/v1` | `moonshot*` / `kimi*` | `MOONSHOT_API_KEY` |
+
+**Protocol-translated** — request/response are reshaped by transforms:
+
+| Provider | Path | Notes |
+|----------|------|-------|
+| Anthropic Claude / GLM | `/messages` | `x-api-key` header auth + `pii_claude` transform |
+| Dify | `/chat-messages` | template reshaping + `dify` stream translator |
+
+Ready-to-use route examples for all of the above are in [`configs/config.yaml`](configs/config.yaml) (the OpenAI-compatible ones are commented out — uncomment and set the matching `*_API_KEY`).
+
 ## Usage
 
 ### Start the server (default 0.0.0.0:8080)
