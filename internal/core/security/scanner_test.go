@@ -508,3 +508,52 @@ func TestMaskEmailFullModeUnchanged(t *testing.T) {
 		t.Errorf("Unmask() = %q, want %q", got, input)
 	}
 }
+
+// TestDetect verifies the pre-send leak check: it reports the names of built-in
+// rules whose pattern still matches an about-to-egress body, and returns empty
+// for a clean one. It must not modify the input.
+func TestDetect(t *testing.T) {
+	scanner := NewScanner()
+
+	// A body where a secret survived masking (e.g. a rule missed it).
+	leaked := "here is a key sk-abcdefghijklmnopqrstuvwx trailing"
+	hits := scanner.Detect(leaked, nil)
+	if len(hits) == 0 {
+		t.Fatalf("expected Detect to flag the surviving OpenAI key, got none")
+	}
+	found := false
+	for _, h := range hits {
+		if h == "OpenAI API Key" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'OpenAI API Key' among hits, got %v", hits)
+	}
+
+	// A fully-masked body (only placeholders) is clean.
+	clean := "here is a key __AIGIS_SEC_0123456789ab__ trailing"
+	if hits := scanner.Detect(clean, nil); len(hits) != 0 {
+		t.Errorf("expected clean body to yield no hits, got %v", hits)
+	}
+}
+
+// TestDetectExtraRules confirms route-scoped extra rules participate in Detect
+// alongside built-ins.
+func TestDetectExtraRules(t *testing.T) {
+	scanner := NewScanner()
+	extra, err := CompileRules([]CustomRule{{Name: "Order ID", Pattern: "ORD-[0-9]+"}})
+	if err != nil {
+		t.Fatalf("CompileRules: %v", err)
+	}
+	hits := scanner.Detect("residual ORD-12345 in body", extra)
+	found := false
+	for _, h := range hits {
+		if h == "Order ID" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected extra rule 'Order ID' among hits, got %v", hits)
+	}
+}

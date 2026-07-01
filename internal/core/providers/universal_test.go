@@ -109,6 +109,71 @@ func TestSend_HeaderPolicyAndBearerAuth(t *testing.T) {
 	}
 }
 
+// TestSend_ForceBlockEgressLeak verifies the strict-review safety net: on a
+// force_block route, if a secret survives masking (here the PII transform is
+// scoped to Email only, so an OpenAI key passes through), Send must refuse to
+// egress — returning an error and never calling the upstream.
+func TestSend_ForceBlockEgressLeak(t *testing.T) {
+	called := false
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+
+	route := &engine.Route{
+		ID:         "fb",
+		ForceBlock: true,
+		Upstream:   engine.Upstream{BaseURL: up.URL, Path: "/x", AuthStrategy: "none"},
+		// Scope masking to Email only, so the OpenAI key survives masking.
+		Transforms: []engine.TransformStep{{Type: "pii", Config: map[string]string{"rules": "Email"}}},
+	}
+	p := providers.NewUniversalProvider(route, nil, nil)
+	ctx := core.NewGatewayContext(context.Background(), nil)
+
+	body := []byte(`{"model":"fb","messages":[{"role":"user","content":"key sk-abcdefghijklmnopqrstuvwx"}]}`)
+	_, err := p.Send(ctx, body, http.Header{})
+	if err == nil {
+		t.Fatal("expected egress block error, got nil")
+	}
+	if !strings.Contains(err.Error(), "egress blocked") {
+		t.Errorf("error should mention egress block, got %v", err)
+	}
+	if called {
+		t.Error("upstream must NOT be called when egress is blocked")
+	}
+}
+
+// TestSend_ForceBlockCleanPasses verifies force_block does not interfere when
+// masking is complete: a fully-masked body egresses normally.
+func TestSend_ForceBlockCleanPasses(t *testing.T) {
+	called := false
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		io.Copy(io.Discard, r.Body)
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer up.Close()
+
+	route := &engine.Route{
+		ID:         "fbc",
+		ForceBlock: true,
+		Upstream:   engine.Upstream{BaseURL: up.URL, Path: "/x", AuthStrategy: "none"},
+		Transforms: []engine.TransformStep{{Type: "pii", Config: map[string]string{}}},
+	}
+	p := providers.NewUniversalProvider(route, nil, nil)
+	ctx := core.NewGatewayContext(context.Background(), nil)
+
+	// The key IS masked (default rules include OpenAI key), so nothing survives.
+	body := []byte(`{"model":"fbc","messages":[{"role":"user","content":"key sk-abcdefghijklmnopqrstuvwx"}]}`)
+	if _, err := p.Send(ctx, body, http.Header{}); err != nil {
+		t.Fatalf("clean force_block request should pass, got %v", err)
+	}
+	if !called {
+		t.Error("upstream should be called when body is fully masked")
+	}
+}
+
 func TestSend_UpstreamErrorSurfaces(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

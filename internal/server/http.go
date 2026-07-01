@@ -348,8 +348,11 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	provider := providers.NewUniversalProvider(route, reqLogger, s.scanner)
 
 	// Branch on streaming: the flusher must be available to stream; otherwise
-	// fall back to blocking.
-	if flusher, ok := w.(http.Flusher); isStream && ok {
+	// fall back to blocking. A force_block route is deliberately kept OUT of the
+	// real streaming branch — it must go through the blocking Send so the
+	// pre-send egress leak check runs on the fully-masked body before anything
+	// leaves the gateway; its client still gets SSE via a pseudo-stream below.
+	if flusher, ok := w.(http.Flusher); isStream && ok && !route.ForceBlock {
 		// SSE response headers
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -366,6 +369,37 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 			succeeded = true
 			br.RecordSuccess()
 		}
+		return
+	}
+
+	// Strict-review pseudo-stream: the client asked for SSE and force_block is on,
+	// so instead of real streaming we run the blocking Send (which performs the
+	// pre-send egress leak check on the fully-masked body), then re-emit the
+	// single buffered response as one SSE data event followed by [DONE]. The
+	// client is unaware it was internally a blocking call.
+	if flusher, ok := w.(http.Flusher); isStream && ok && route.ForceBlock {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		resp, err := provider.Send(ctx, body, r.Header)
+		if err != nil {
+			// Egress-blocked or upstream error: nothing has been written yet, so a
+			// clean SSE error event is still deliverable before the stream ends.
+			br.RecordFailure()
+			reqLogger.Error("Provider error (force_block stream)", zap.Error(err))
+			fmt.Fprintf(w, "data: {\"error\":{\"message\":%q}}\n\n", err.Error())
+			flusher.Flush()
+			return
+		}
+		br.RecordSuccess()
+
+		// Emit the buffered result as a single SSE chunk, then the terminator.
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: %s\n\n", resp)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		succeeded = true
 		return
 	}
 

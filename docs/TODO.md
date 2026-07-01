@@ -10,8 +10,8 @@
 
 ## B. 功能方向（需确认是否要做 / 优先级）
 - [ ] **更多 provider 适配** — 现有 openai / gemini / claude(glm) / dify；可继续加（需原生格式的则参考 dify 翻译那套）
-- [ ] **脱敏增强（进阶）** — 已支持 custom_rules + 按路由选规则子集；可再扩展 per-route 额外自定义规则
-- [ ] **流式强审核** — dify message_replace 已 surface 替换内容，但流式无法回撤已发 delta；强审核场景的 blocking 自动降级可考虑
+- [x] **脱敏增强（进阶）** — per-route 额外自定义规则（transform `custom_rules`，进程级编译缓存，不污染共享 scanner）
+- [x] **流式强审核** — 路由 `force_block`：stream 请求内部降级为 blocking，脱敏后做 egress 泄露复检（内置规则漏网即拒发），客户端仍收到伪流式 SSE
 
 ## 待澄清 / 观察项
 - [x] 日志 `upstream` 字段改为打印解析后 URL —— 抽 `Upstream.ResolvedBaseURL()` 统一 env: 解析，日志与请求共用同一来源

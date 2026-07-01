@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bytedance/sonic"
+	"go.uber.org/zap"
 
 	"aigis/internal/core"
 	"aigis/internal/core/engine"
@@ -61,6 +63,14 @@ func (p *UniversalProvider) Send(ctx *core.AIGisContext, body []byte, originalHe
 	transformedBody, err := p.applyRequestTransforms(ctx, body)
 	if err != nil {
 		return nil, fmt.Errorf("transform error: %w", err)
+	}
+
+	// Step 1b: Strict-review egress check. On force_block routes, scan the
+	// fully-masked body one last time before anything leaves the gateway; if a
+	// built-in secret pattern still matches, a masking rule missed it — refuse to
+	// send rather than leak.
+	if err := p.egressLeakCheck(transformedBody); err != nil {
+		return nil, err
 	}
 
 	// Step 2: Prepare and send request with headers
@@ -144,6 +154,26 @@ func (p *UniversalProvider) SendStream(ctx *core.AIGisContext, body []byte, orig
 			return fmt.Errorf("failed to read upstream stream: %w", readErr)
 		}
 	}
+}
+
+// egressLeakCheck is the final pre-send safety net for strict-review routes.
+// It is a no-op unless the route sets force_block. It scans the already-masked
+// body with the scanner's built-in secret rules; any match means masking missed
+// a secret, so it returns an error to abort the request before it egresses.
+// Built-in rules only: route-scoped custom rules mark business IDs (e.g. order
+// numbers), not leak-grade secrets, so their residue must not block a request.
+func (p *UniversalProvider) egressLeakCheck(body []byte) error {
+	if !p.route.ForceBlock {
+		return nil
+	}
+	if hits := p.scanner.Detect(string(body), nil); len(hits) > 0 {
+		p.log.Warn("Egress leak check blocked request",
+			zap.String("route_id", p.route.ID),
+			zap.Strings("leaked_rules", hits),
+		)
+		return fmt.Errorf("egress blocked: sensitive data (%s) survived masking", strings.Join(hits, ", "))
+	}
+	return nil
 }
 
 // applyRequestTransforms applies all configured transformations to the request

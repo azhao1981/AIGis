@@ -92,6 +92,26 @@ func (s *Scanner) Sanitize(input string) string {
 	return result
 }
 
+// Detect reports the names of rules whose pattern still matches input, without
+// modifying it. It is the pre-send leak check for strict-review routes: run it
+// on the already-masked, about-to-egress body so any secret a masking rule
+// missed is caught before anything leaves the gateway. Empty result = clean.
+// extra holds route-scoped rules (mirrors MaskWithExtraRules) so the check
+// covers the exact same rule set that masking used.
+func (s *Scanner) Detect(input string, extra []Rule) []string {
+	var hits []string
+	check := func(rules []Rule) {
+		for _, rule := range rules {
+			if rule.Pattern.MatchString(input) {
+				hits = append(hits, rule.Name)
+			}
+		}
+	}
+	check(s.rules)
+	check(extra)
+	return hits
+}
+
 // generatePlaceholder generates a unique placeholder for a secret using SHA256 hash
 // Format: __AIGIS_SEC_<first 12 chars of SHA256>__
 // Using hash ensures the same secret always gets the same placeholder within the request

@@ -27,6 +27,12 @@ type Route struct {
 	// (e.g. "dify" to translate Dify SSE into OpenAI chunks). Empty/"unmask"
 	// means passthrough + cross-chunk unmask. Validated against known names.
 	StreamTranslate string `mapstructure:"stream_translate"`
+	// ForceBlock enables strict egress review on this route: a streaming request
+	// (stream:true) is served internally via the blocking path so a final
+	// pre-send leak check can run on the fully-masked body before anything is
+	// sent upstream. The client still gets an SSE response (the buffered result
+	// is re-emitted as a pseudo-stream), so it is unaware of the downgrade.
+	ForceBlock bool `mapstructure:"force_block"`
 	// HeaderPolicy defines how to handle HTTP headers
 	HeaderPolicy HeaderPolicy `mapstructure:"header_policy"`
 }
