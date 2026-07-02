@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIGis Admin</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --border:#2a2f3a; --fg:#e6e8ec; --muted:#8b93a1; --accent:#4f9dff; --danger:#ff5c5c; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:12px; padding:12px 20px; border-bottom:1px solid var(--border); background:var(--panel); }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .sp { flex:1; }
+  input, select, button { font:inherit; color:var(--fg); background:#12151b; border:1px solid var(--border); border-radius:6px; padding:6px 10px; }
+  button { cursor:pointer; background:#20242e; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.danger { color:var(--danger); }
+  nav { display:flex; gap:4px; padding:8px 20px; border-bottom:1px solid var(--border); }
+  nav button { background:transparent; border:none; border-bottom:2px solid transparent; border-radius:0; padding:8px 12px; color:var(--muted); }
+  nav button.active { color:var(--fg); border-bottom-color:var(--accent); }
+  main { padding:20px; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  .stat { background:#12151b; border:1px solid var(--border); border-radius:8px; padding:14px; }
+  .stat .n { font-size:22px; font-weight:600; }
+  .stat .l { color:var(--muted); font-size:12px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); font-size:13px; }
+  th { color:var(--muted); font-weight:500; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  .msg { color:var(--danger); font-size:13px; min-height:18px; }
+  .muted { color:var(--muted); }
+  code { background:#12151b; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AIGis Admin</h1>
+  <span class="muted" id="build"></span>
+  <span class="sp"></span>
+  <input id="token" type="password" placeholder="Bearer token (for /admin/*)" size="28">
+  <button id="saveTok">Save</button>
+  <button id="clearTok">Clear</button>
+</header>
+<nav id="tabs"></nav>
+<main id="main"></main>
+
+<script>
+const TOKEN_KEY = "aigis_admin_token";
+let capabilities = { panels: ["status"] };
+
+function token() { return localStorage.getItem(TOKEN_KEY) || ""; }
+function authHeaders() { const t = token(); return t ? { "Authorization": "Bearer " + t } : {}; }
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { ...(opts.headers||{}), ...authHeaders() } });
+  return res;
+}
+async function apiJSON(path, opts) {
+  const res = await api(path, opts);
+  if (!res.ok) throw new Error("HTTP " + res.status + ": " + (await res.text()).slice(0,200));
+  return res.json();
+}
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function el(id){ return document.getElementById(id); }
+
+// ---- Panel definitions. status ships in OSS; keys/usage/audit only render
+// when the build (via /ui/capabilities) advertises them.
+const PANELS = {
+  status: { label: "Status", render: renderStatus },
+  keys:   { label: "API Keys", render: renderKeys },
+  usage:  { label: "Usage", render: renderUsage },
+  audit:  { label: "Key Audit", render: renderAudit },
+};
+
+function activate(name) {
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.p === name));
+  document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "panel-" + name));
+  PANELS[name].render();
+}
+
+function buildTabs() {
+  const nav = el("tabs"), main = el("main");
+  nav.innerHTML = ""; main.innerHTML = "";
+  capabilities.panels.forEach(name => {
+    if (!PANELS[name]) return;
+    const b = document.createElement("button");
+    b.textContent = PANELS[name].label; b.dataset.p = name;
+    b.onclick = () => activate(name);
+    nav.appendChild(b);
+    const d = document.createElement("div");
+    d.className = "panel"; d.id = "panel-" + name;
+    main.appendChild(d);
+  });
+  if (capabilities.panels.length) activate(capabilities.panels[0]);
+}
+
+// ---- status: /health + /metrics (OSS core, no auth needed)
+async function renderStatus() {
+  const p = el("panel-status");
+  p.innerHTML = `<div class="card"><div class="row"><button id="refreshStat" class="primary">Refresh</button><span class="muted">gateway health &amp; concurrency</span></div><div id="statBody" class="grid"></div><div class="msg" id="statMsg"></div></div>`;
+  el("refreshStat").onclick = renderStatus;
+  try {
+    const h = await (await fetch("/health")).json();
+    const m = await (await fetch("/metrics")).json();
+    const cards = [
+      ["health", h.status || "?"],
+      ["in flight", m.in_flight], ["peak", m.peak_concurrency],
+      ["total", m.total_requests], ["success", m.success], ["failed", m.failed],
+      ["uptime (s)", m.uptime_sec],
+    ];
+    el("statBody").innerHTML = cards.map(([l,n]) => `<div class="stat"><div class="n">${esc(n)}</div><div class="l">${l}</div></div>`).join("");
+  } catch(e) { el("statMsg").textContent = e.message; }
+}
+
+// ---- keys: EE /admin/keys (GET list / POST create / DELETE revoke)
+async function renderKeys() {
+  const p = el("panel-keys");
+  p.innerHTML = `
+    <div class="card">
+      <div class="row">
+        <input id="kTenant" placeholder="filter tenant">
+        <input id="kLimit" type="number" placeholder="limit" style="width:90px">
+        <input id="kOffset" type="number" placeholder="offset" style="width:90px">
+        <button id="kLoad" class="primary">Load</button>
+      </div>
+      <table><thead><tr><th>tenant</th><th>subject</th><th>enabled</th><th>admin</th><th></th></tr></thead><tbody id="kBody"></tbody></table>
+      <div class="msg" id="kMsg"></div>
+    </div>
+    <div class="card">
+      <div class="row">
+        <input id="nKey" placeholder="raw key"><input id="nTenant" placeholder="tenant"><input id="nSubject" placeholder="subject">
+        <label class="muted"><input id="nAdmin" type="checkbox"> admin</label>
+        <button id="kCreate" class="primary">Create</button>
+      </div>
+      <div class="msg" id="kMsg2"></div>
+    </div>`;
+  el("kLoad").onclick = loadKeys;
+  el("kCreate").onclick = createKey;
+  loadKeys();
+}
+async function loadKeys() {
+  const q = new URLSearchParams();
+  if (el("kTenant").value) q.set("tenant", el("kTenant").value);
+  if (el("kLimit").value) q.set("limit", el("kLimit").value);
+  if (el("kOffset").value) q.set("offset", el("kOffset").value);
+  try {
+    const d = await apiJSON("/admin/keys?" + q);
+    el("kBody").innerHTML = (d.keys||[]).map(k => `<tr>
+      <td>${esc(k.tenant)}</td><td>${esc(k.subject)}</td><td>${k.enabled}</td><td>${k.admin}</td>
+      <td><button class="danger" data-t="${esc(k.subject)}">revoke by key…</button></td></tr>`).join("") || `<tr><td colspan="5" class="muted">no keys</td></tr>`;
+    el("kMsg").textContent = "";
+  } catch(e){ el("kMsg").textContent = e.message; }
+}
+async function createKey() {
+  const body = { key: el("nKey").value, tenant: el("nTenant").value, subject: el("nSubject").value, admin: el("nAdmin").checked };
+  try {
+    const res = await api("/admin/keys", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error("HTTP " + res.status + ": " + (await res.text()).slice(0,200));
+    el("kMsg2").textContent = "created"; el("nKey").value=""; loadKeys();
+  } catch(e){ el("kMsg2").textContent = e.message; }
+}
+async function revokeKeyPrompt() {
+  const raw = prompt("raw key to revoke:");
+  if (!raw) return;
+  try {
+    const res = await api("/admin/keys", { method:"DELETE", headers:{"Content-Type":"application/json"}, body: JSON.stringify({key:raw}) });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    loadKeys();
+  } catch(e){ el("kMsg").textContent = e.message; }
+}
+
+// ---- usage: EE /admin/usage (JSON table + CSV download)
+async function renderUsage() {
+  const p = el("panel-usage");
+  p.innerHTML = `
+    <div class="card">
+      <div class="row">
+        <input id="uTenant" placeholder="tenant (optional)">
+        <select id="uGran"><option value="day">day</option><option value="hour">hour</option><option value="month">month</option></select>
+        <button id="uLoad" class="primary">Load</button>
+        <button id="uCsv">Download CSV</button>
+      </div>
+      <table><thead><tr><th>bucket</th><th>tenant</th><th>requests</th><th>prompt</th><th>completion</th><th>total</th></tr></thead><tbody id="uBody"></tbody></table>
+      <div class="msg" id="uMsg"></div>
+    </div>`;
+  el("uLoad").onclick = loadUsage;
+  el("uCsv").onclick = () => {
+    const q = new URLSearchParams({ granularity: el("uGran").value, format: "csv" });
+    if (el("uTenant").value) q.set("tenant", el("uTenant").value);
+    downloadCSV("/admin/usage?" + q);
+  };
+  loadUsage();
+}
+async function loadUsage() {
+  const q = new URLSearchParams({ granularity: el("uGran").value });
+  if (el("uTenant").value) q.set("tenant", el("uTenant").value);
+  try {
+    const d = await apiJSON("/admin/usage?" + q);
+    el("uBody").innerHTML = (d.usage||[]).map(u => `<tr><td>${esc(u.bucket)}</td><td>${esc(u.tenant)}</td><td>${u.requests}</td><td>${u.prompt_tokens}</td><td>${u.completion_tokens}</td><td>${u.total_tokens}</td></tr>`).join("") || `<tr><td colspan="6" class="muted">no usage</td></tr>`;
+    el("uMsg").textContent = "";
+  } catch(e){ el("uMsg").textContent = e.message; }
+}
+async function downloadCSV(path) {
+  try {
+    const res = await api(path);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "usage.csv"; a.click();
+    URL.revokeObjectURL(a.href);
+  } catch(e){ el("uMsg").textContent = e.message; }
+}
+
+// ---- audit: EE /admin/keys/audit (read-only)
+async function renderAudit() {
+  const p = el("panel-audit");
+  p.innerHTML = `
+    <div class="card">
+      <div class="row">
+        <input id="aKey" placeholder="key (plaintext, optional)">
+        <select id="aAction"><option value="">any action</option><option value="create">create</option><option value="revoke">revoke</option></select>
+        <input id="aLimit" type="number" placeholder="limit" style="width:90px">
+        <button id="aLoad" class="primary">Load</button>
+      </div>
+      <table><thead><tr><th>ts</th><th>action</th><th>key_hash</th><th>target_tenant</th><th>actor</th></tr></thead><tbody id="aBody"></tbody></table>
+      <div class="msg" id="aMsg"></div>
+    </div>`;
+  el("aLoad").onclick = loadAudit;
+  loadAudit();
+}
+async function loadAudit() {
+  const q = new URLSearchParams();
+  if (el("aKey").value) q.set("key", el("aKey").value);
+  if (el("aAction").value) q.set("action", el("aAction").value);
+  if (el("aLimit").value) q.set("limit", el("aLimit").value);
+  try {
+    const d = await apiJSON("/admin/keys/audit?" + q);
+    el("aBody").innerHTML = (d.audit||[]).map(a => `<tr><td>${esc(a.ts)}</td><td>${esc(a.action)}</td><td><code>${esc((a.key_hash||"").slice(0,12))}…</code></td><td>${esc(a.target_tenant)}</td><td>${esc(a.actor_subject)}${a.actor_tenant?" @"+esc(a.actor_tenant):""}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">no audit rows</td></tr>`;
+    el("aMsg").textContent = "";
+  } catch(e){ el("aMsg").textContent = e.message; }
+}
+
+// event delegation for dynamically-added revoke buttons
+document.addEventListener("click", e => { if (e.target.matches('[data-t]')) revokeKeyPrompt(); });
+
+el("token").value = token();
+el("saveTok").onclick = () => { localStorage.setItem(TOKEN_KEY, el("token").value); location.reload(); };
+el("clearTok").onclick = () => { localStorage.removeItem(TOKEN_KEY); el("token").value=""; location.reload(); };
+
+(async function init() {
+  try { capabilities = await apiJSON("/ui/capabilities"); } catch(_) { capabilities = { panels:["status"] }; }
+  el("build").textContent = capabilities.panels.length > 1 ? "Enterprise" : "OSS";
+  buildTabs();
+})();
+</script>
+</body>
+</html>

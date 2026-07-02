@@ -15,6 +15,7 @@ import (
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 
+	"aigis/internal/adminui"
 	"aigis/internal/config"
 	"aigis/internal/core"
 	"aigis/internal/core/audit"
@@ -205,6 +206,11 @@ func (s *HTTPServer) setupRoutes() *http.ServeMux {
 	// /v1/messages: Anthropic-native clients (e.g. Claude Code via ANTHROPIC_BASE_URL)
 	mux.HandleFunc("/v1/chat/completions", s.handleGateway)
 	mux.HandleFunc("/v1/messages", s.handleGateway)
+
+	// Admin dashboard: embedded single page + capability discovery. Core ships
+	// only the status panel; EE lights up more panels via a capabilities
+	// middleware layered on /ui/capabilities.
+	adminui.RegisterRoutes(mux)
 
 	// Root endpoint
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

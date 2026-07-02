@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	eeadminui "aigis/ee/adminui"
 	"aigis/ee/auth"
 	"aigis/ee/billing"
 	eequota "aigis/ee/quota"
@@ -126,6 +127,9 @@ var serveCmd = &cobra.Command{
 			// Read-only usage query API (GET /admin/usage). Registered after auth
 			// so admin calls require a valid API key.
 			srv.Use(billing.AdminMiddleware(pgSink, globalLogger))
+			// Light up the keys/usage/audit tabs in the embedded admin dashboard;
+			// the panels are backed by the /admin/* endpoints registered above.
+			srv.Use(eeadminui.CapabilitiesMiddleware())
 			globalLogger.Sugar().Info("EE billing: usage persisted to PostgreSQL; /admin/usage enabled")
 		} else {
 			srv.SetUsageSink(billing.NewMeteringSink(globalLogger))

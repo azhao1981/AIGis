@@ -14,11 +14,16 @@ import (
 	"aigis/internal/server"
 )
 
-// skipPaths are unauthenticated endpoints (health/liveness), so probes and load
-// balancers don't need a token.
+// skipPaths are unauthenticated endpoints, so probes/load balancers and the
+// admin dashboard's initial load don't need a token. /ui serves the static page
+// and /ui/capabilities advertises which panels to show — both must be reachable
+// before the operator has entered a token; the /admin/* data behind the panels
+// stays auth-guarded.
 var skipPaths = map[string]bool{
-	"/health": true,
-	"/":       true,
+	"/health":          true,
+	"/":                true,
+	"/ui":              true,
+	"/ui/capabilities": true,
 }
 
 // Middleware returns a server.Middleware that authenticates every gateway
