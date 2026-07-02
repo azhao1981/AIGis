@@ -34,6 +34,14 @@
 - **Admin 接口完善**：用量 CSV 导出 `GET /admin/usage?...&format=csv`（`text/csv` 附件，复用 `QueryUsage`，表头 + 每桶一行）；keys 按租户过滤 + 分页 `GET /admin/keys?tenant=&limit=&offset=`（`ListKeys(KeyQuery)`，`WHERE ($1='' OR tenant=$1) LIMIT/OFFSET`，无参=原全量行为，零破坏）；审计同加 `offset` 分页；真机 e2e：CSV 头/行正确、tenant 过滤命中、limit/offset 翻页精确
 - **管理 UI（能力发现分层）**：核心 `internal/adminui` 内嵌单页仪表盘（`go:embed index.html`，零 npm/构建链）+ 能力发现端点——`GET /ui` 出页面、`GET /ui/capabilities` 出 `{"panels":[...]}`；OSS 只报 `["status"]`（`/health`+`/metrics` 只读状态面板，无需 token），页面按 capabilities 动态渲染 Tab，同一页适配两种构建**不 fork**；EE `ee/adminui` `CapabilitiesMiddleware`（`server.Middleware` 拦 `/ui/capabilities`）覆写为四面板 `status/keys/usage/audit`，DSN 有时 `serve.go` `srv.Use` 点亮，数据 Tab 直连既有 `/admin/*`（token 存 localStorage，请求带 `Authorization: Bearer`）；`/ui`+`/ui/capabilities` 进 auth `skipPaths`（首屏无 token 可加载，`/admin/*` 数据仍 401 守护）；依赖方向 CORE_CLEAN（`internal/adminui` 不引 ee/pgx/redis）；真机 e2e：OSS 只 status、EE 点亮四 Tab、无 token /ui 返 200 而 /admin/keys 返 401
 
+### SaaS — 用户登录地基（batch A）
+- **用户/密码登录（人 vs 机并行，非替换）**：`ee/auth` 加 `users` 表（`migrations/004_users.sql`，email 唯一 + tenant + is_admin + enabled）、`UserStore`（**bcrypt 哈希，明文永不落库**；`CreateUser` 幂等 upsert、`VerifyPassword` 错误统一返 `ErrInvalidCredentials` 防邮箱探测）、`SessionStore`（Redis 服务端会话 `aigis:session:<id>`→JSON Principal，滑动 TTL 默认 24h，`crypto/rand` 16B id；选服务端会话而非 JWT 是为**即时登出/吊销** + 多副本共享）
+- **双认证中间件**：`ee/auth` `SessionMiddleware`（同一 `server.Middleware`）先认 session cookie、后退回 Bearer API key——**程序化客户端零改动**，人登录 UI 管理 key、程序拿 key 打网关；`POST /login`（验密→建会话→下发 `aigis_session` HttpOnly/SameSite=Lax cookie）、`POST /logout`（服务端删会话 + 清 cookie）、`GET /me`（当前 principal）；`/login`/`/logout`/`/me` 进 `skipPaths`（无会话库时 `/me` 落 catch-all 200，UI 据此退回 token 模式而非死登录页）
+- **接线 + 种子**：`serve.go` DSN 分支下，配 `ee.auth.session.redis_addr`（或复用 `ee.quota.redis_addr`）则建 `UserStore`+`SessionStore`、按 `ee.auth.users` 幂等 upsert 种子用户、`srv.Use(SessionMiddleware)`；未配则退回 `auth.Middleware`（纯 API key）
+- **UI 登录页**：`index.html` init 探 `/me`——401→登录表单、有 `subject`→登录态（显示 whoami/Logout、隐藏 token 框）、其它→API-key 模式（token 框）；fetch 全带 `credentials:"include"`
+- **测试**：`session_middleware`（接口 seam `sessionAPI`/`userAPI` + 内存 fake，7 例：登录发 cookie/错密码 401/无凭证 401/登出失效/`/me`/Bearer 退回）、`users`（`normalizeEmail`、bcrypt 往返）无库单测全过；CORE_CLEAN（bcrypt/pgx/redis 不漏进核心）
+- **真机 e2e（PG+Redis，11/11）**：无凭证 /admin/keys 401 → 错密码 login 401 → 正确 login 200 发 cookie → 带 cookie /me 出 subject → 带 cookie /admin/keys 200 → Bearer key /admin/keys 仍 200 → /logout 204 → 同 cookie 再访问 401
+
 ---
 
 ## 待办（TODO / 观察项，按需）
@@ -41,6 +49,8 @@
 - [ ] **用量不丢的强保证（WAL）**：当前突发过载/DB 长挂仍会丢弃（有计数、不静默）；若计费要求「一条不丢」，需落盘缓冲（WAL / 磁盘队列）重放——重量级，按需再上
 - [ ] **配额维度扩展**：现仅并发数，可加 QPS / token 配额（token 配额需读用量库）
 - [ ] **API key 近实时失效（pub/sub）**：现为轮询刷新（默认 30s 收敛，有界延迟）；若吊销需秒级跨副本生效，可加 Redis pub/sub 广播失效事件（各副本收到即 Reload）——引入 auth→redis 依赖 + 断连重订阅，按需再上
+- [ ] **SaaS batch B — 租户数据隔离**：现登录用户已带 tenant，但 `/admin/*` 仍按 key 的 admin 位放行、不限租户；需按登录 principal 的 tenant 过滤 keys/usage/audit（非 admin 只见本租户），管理员跨租户
+- [ ] **SaaS batch C — 自助注册 + 邮箱验证 + 角色细分**：开放 `POST /register` + 邮件验证码激活、租户内 owner/member 角色、密码重置流程——按需再上
 
 ## 相关 OSS 待澄清项（见 TODO.md B 段，按需）
 - Azure OpenAI legacy（`?api-version=` + `api-key` 头）
@@ -58,6 +68,16 @@ ee:
     admin_keys:          # 其中拥有 /admin/* 权限的 key 列表
       - "key-xxx"
     reload_interval_sec: 30  # 多副本下后台刷新 key 快照间隔秒（默认 30，≤0=禁用/单副本）
+    session:               # 设置 redis_addr 后启用 SaaS 用户登录（/login /logout /me）
+      redis_addr: ""       # 会话存储 Redis；留空则复用 ee.quota.redis_addr；都空=纯 API key
+      redis_password: ""
+      redis_db: 0
+      ttl_hours: 24        # 会话滑动过期小时数（0/未设=默认 24）
+    users:                 # 启动幂等 upsert 的仪表盘登录用户（bcrypt 哈希）
+      - email: "admin@acme.io"
+        password: "change-me"
+        tenant: "acme"
+        admin: true
   billing:
     dsn: "postgres://..."   # 亦可用环境变量 AIGIS_EE_BILLING_DSN（优先，密码不落盘）
     queue_size: 4096        # 异步写队列容量（0=默认 4096）

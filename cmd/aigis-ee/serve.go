@@ -104,7 +104,40 @@ var serveCmd = &cobra.Command{
 			// Keep this replica's snapshot in sync with keys created/revoked on
 			// other replicas by periodically reloading from the DB.
 			keyProvider.StartRefresh(authReloadInterval())
-			srv.Use(auth.Middleware(keyProvider))
+
+			// SaaS dashboard logins (human email+password) sit in front of the
+			// API-key auth when a session store (Redis) is configured: the same
+			// middleware accepts a session cookie OR a Bearer key, so programmatic
+			// clients keep working. Without Redis we fall back to API-key only.
+			if raddr, rpw, rdb := sessionRedis(); raddr != "" {
+				userStore, err := auth.NewUserStore(cmd.Context(), dsn, globalLogger)
+				if err != nil {
+					return fmt.Errorf("failed to init user store: %w", err)
+				}
+				defer userStore.Close()
+				sessionStore, err := auth.NewSessionStore(cmd.Context(), raddr, rpw, rdb, sessionTTL())
+				if err != nil {
+					return fmt.Errorf("failed to init session store: %w", err)
+				}
+				defer sessionStore.Close()
+				// Bootstrap dashboard users from config (idempotent upsert).
+				for _, u := range seedUsers() {
+					email, _ := u["email"].(string)
+					pw, _ := u["password"].(string)
+					tenant, _ := u["tenant"].(string)
+					admin, _ := u["admin"].(bool)
+					if email == "" || pw == "" || tenant == "" {
+						continue
+					}
+					if err := userStore.CreateUser(cmd.Context(), email, pw, tenant, admin); err != nil {
+						return fmt.Errorf("failed to seed user %q: %w", email, err)
+					}
+				}
+				srv.Use(auth.SessionMiddleware(userStore, sessionStore, keyProvider, globalLogger))
+				globalLogger.Sugar().Info("EE auth: dashboard login enabled (session via Redis); /login /logout /me active")
+			} else {
+				srv.Use(auth.Middleware(keyProvider))
+			}
 			srv.Use(auth.AdminMiddleware(keyProvider, globalLogger))
 			globalLogger.Sugar().Info("EE auth: API keys from DB; /admin/keys enabled")
 		} else if keys := apiKeys(); len(keys) > 0 {
@@ -196,6 +229,42 @@ func eeDSN() string {
 		return dsn
 	}
 	return viper.GetString("ee.billing.dsn")
+}
+
+// sessionRedis resolves where dashboard login sessions are stored. It prefers
+// ee.auth.session.redis_addr, falling back to the quota Redis (ee.quota.redis_addr)
+// so a single Redis can serve both. Empty means no session store -> the SaaS
+// login is disabled and the gateway stays API-key only.
+func sessionRedis() (addr, password string, db int) {
+	addr = viper.GetString("ee.auth.session.redis_addr")
+	if addr != "" {
+		return addr, viper.GetString("ee.auth.session.redis_password"), viper.GetInt("ee.auth.session.redis_db")
+	}
+	return viper.GetString("ee.quota.redis_addr"),
+		viper.GetString("ee.quota.redis_password"),
+		viper.GetInt("ee.quota.redis_db")
+}
+
+// sessionTTL reads ee.auth.session.ttl_hours; 0/unset falls back to the store
+// default (24h).
+func sessionTTL() time.Duration {
+	return time.Duration(viper.GetInt("ee.auth.session.ttl_hours")) * time.Hour
+}
+
+// seedUsers reads the ee.auth.users bootstrap list: each entry declares a
+// dashboard login (email/password/tenant/admin) to upsert on startup.
+func seedUsers() []map[string]any {
+	var out []map[string]any
+	raw, ok := viper.Get("ee.auth.users").([]any)
+	if !ok {
+		return out
+	}
+	for _, item := range raw {
+		if m, ok := item.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // billingOptions reads the async usage-writer tuning from config. All keys are

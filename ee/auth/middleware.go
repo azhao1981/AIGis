@@ -24,6 +24,13 @@ var skipPaths = map[string]bool{
 	"/":                true,
 	"/ui":              true,
 	"/ui/capabilities": true,
+	"/login":           true,
+	"/logout":          true,
+	// /me: with a session store, SessionMiddleware handles it before the
+	// skipPaths check. Without one (API-key-only), letting it fall through to
+	// the catch-all (200, no principal) — rather than 401 — signals the UI to
+	// stay in token mode instead of showing a dead login form.
+	"/me": true,
 }
 
 // Middleware returns a server.Middleware that authenticates every gateway

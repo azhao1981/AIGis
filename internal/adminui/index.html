@@ -41,12 +41,26 @@
   <h1>AIGis Admin</h1>
   <span class="muted" id="build"></span>
   <span class="sp"></span>
-  <input id="token" type="password" placeholder="Bearer token (for /admin/*)" size="28">
-  <button id="saveTok">Save</button>
-  <button id="clearTok">Clear</button>
+  <span id="whoami" class="muted" style="display:none"></span>
+  <button id="logout" style="display:none">Logout</button>
+  <span id="tokBox">
+    <input id="token" type="password" placeholder="Bearer token (for /admin/*)" size="24">
+    <button id="saveTok">Save</button>
+    <button id="clearTok">Clear</button>
+  </span>
 </header>
 <nav id="tabs"></nav>
 <main id="main"></main>
+
+<div id="loginView" style="display:none">
+  <div class="card" style="max-width:360px;margin:60px auto">
+    <h2 style="margin-top:0;font-size:18px">Sign in</h2>
+    <div class="row"><input id="liEmail" placeholder="email" style="flex:1"></div>
+    <div class="row"><input id="liPass" type="password" placeholder="password" style="flex:1"></div>
+    <div class="row"><button id="liBtn" class="primary" style="flex:1">Log in</button></div>
+    <div class="msg" id="liMsg"></div>
+  </div>
+</div>
 
 <script>
 const TOKEN_KEY = "aigis_admin_token";
@@ -56,7 +70,7 @@ function token() { return localStorage.getItem(TOKEN_KEY) || ""; }
 function authHeaders() { const t = token(); return t ? { "Authorization": "Bearer " + t } : {}; }
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, { ...opts, headers: { ...(opts.headers||{}), ...authHeaders() } });
+  const res = await fetch(path, { ...opts, credentials: "include", headers: { ...(opts.headers||{}), ...authHeaders() } });
   return res;
 }
 async function apiJSON(path, opts) {
@@ -104,8 +118,8 @@ async function renderStatus() {
   p.innerHTML = `<div class="card"><div class="row"><button id="refreshStat" class="primary">Refresh</button><span class="muted">gateway health &amp; concurrency</span></div><div id="statBody" class="grid"></div><div class="msg" id="statMsg"></div></div>`;
   el("refreshStat").onclick = renderStatus;
   try {
-    const h = await (await fetch("/health")).json();
-    const m = await (await fetch("/metrics")).json();
+    const h = await (await fetch("/health", { credentials: "include" })).json();
+    const m = await (await fetch("/metrics", { credentials: "include" })).json();
     const cards = [
       ["health", h.status || "?"],
       ["in flight", m.in_flight], ["peak", m.peak_concurrency],
@@ -251,10 +265,60 @@ el("token").value = token();
 el("saveTok").onclick = () => { localStorage.setItem(TOKEN_KEY, el("token").value); location.reload(); };
 el("clearTok").onclick = () => { localStorage.removeItem(TOKEN_KEY); el("token").value=""; location.reload(); };
 
+// ---- session login: when the build exposes /me (dashboard logins enabled),
+// gate the UI behind an email/password form; otherwise fall back to the Bearer
+// token box (OSS / API-key-only deployments).
+async function login() {
+  const body = { email: el("liEmail").value, password: el("liPass").value };
+  try {
+    const res = await fetch("/login", { method:"POST", credentials:"include",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error((await res.json().catch(()=>({}))).error?.message || ("HTTP " + res.status));
+    location.reload();
+  } catch(e){ el("liMsg").textContent = e.message; }
+}
+async function logout() {
+  try { await fetch("/logout", { method:"POST", credentials:"include" }); } catch(_) {}
+  location.reload();
+}
+function showLogin() {
+  el("loginView").style.display = "block";
+  document.querySelector("nav").style.display = "none";
+  el("main").style.display = "none";
+  el("tokBox").style.display = "none";
+  el("liBtn").onclick = login;
+  el("liPass").onkeydown = e => { if (e.key === "Enter") login(); };
+}
+function showApp(me) {
+  if (me) {
+    el("whoami").style.display = "";
+    el("whoami").textContent = me.subject + (me.tenant ? " · " + me.tenant : "") + (me.admin ? " · admin" : "");
+    el("logout").style.display = "";
+    el("logout").onclick = logout;
+    el("tokBox").style.display = "none"; // session covers auth; hide the token box
+  }
+  buildTabs();
+}
+
 (async function init() {
   try { capabilities = await apiJSON("/ui/capabilities"); } catch(_) { capabilities = { panels:["status"] }; }
   el("build").textContent = capabilities.panels.length > 1 ? "Enterprise" : "OSS";
-  buildTabs();
+
+  // Probe /me to learn whether dashboard logins are enabled and whether we are
+  // logged in. A 401 authentication_error means logins are on but we're signed
+  // out -> show the form. A valid principal (has subject) -> logged in. Anything
+  // else (no /me route, catch-all 200 without a subject) -> API-key mode, just
+  // render the app with the token box.
+  try {
+    const res = await fetch("/me", { credentials: "include" });
+    if (res.status === 401) { showLogin(); return; }
+    if (res.ok) {
+      const me = await res.json().catch(() => ({}));
+      showApp(me && me.subject ? me : null);
+      return;
+    }
+    showApp(null);
+  } catch(_) { showApp(null); }
 })();
 </script>
 </body>
