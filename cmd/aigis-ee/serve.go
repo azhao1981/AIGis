@@ -100,6 +100,9 @@ var serveCmd = &cobra.Command{
 					return fmt.Errorf("failed to seed API key: %w", err)
 				}
 			}
+			// Keep this replica's snapshot in sync with keys created/revoked on
+			// other replicas by periodically reloading from the DB.
+			keyProvider.StartRefresh(authReloadInterval())
 			srv.Use(auth.Middleware(keyProvider))
 			srv.Use(auth.AdminMiddleware(keyProvider, globalLogger))
 			globalLogger.Sugar().Info("EE auth: API keys from DB; /admin/keys enabled")
@@ -168,6 +171,16 @@ func adminKeys() map[string]bool {
 		set[k] = true
 	}
 	return set
+}
+
+// authReloadInterval returns how often the DB-backed key provider should reload
+// its snapshot to pick up keys created/revoked on other replicas. Reads
+// ee.auth.reload_interval_sec; defaults to 30s; <=0 disables (single-replica).
+func authReloadInterval() time.Duration {
+	if !viper.IsSet("ee.auth.reload_interval_sec") {
+		return 30 * time.Second
+	}
+	return time.Duration(viper.GetInt("ee.auth.reload_interval_sec")) * time.Second
 }
 
 // eeDSN resolves the shared Enterprise datastore DSN (auth registry + usage

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
@@ -34,6 +35,16 @@ type PostgresAPIKeyProvider struct {
 
 	mu   sync.RWMutex
 	keys map[string]Principal // key_hash -> principal
+
+	// Background refresh: keeps this replica's snapshot in sync with keys
+	// created/revoked on other replicas. Started by StartRefresh, stopped by Close.
+	wg        sync.WaitGroup
+	done      chan struct{}
+	closeOnce sync.Once
+
+	// refreshFn is the action run on each refresh tick. Defaults to Reload;
+	// tests swap it to observe ticks without a real database.
+	refreshFn func(context.Context) error
 }
 
 // NewPostgresAPIKeyProvider connects, verifies connectivity, and loads the
@@ -47,12 +58,44 @@ func NewPostgresAPIKeyProvider(ctx context.Context, dsn string, log *zap.Logger)
 		pool.Close()
 		return nil, fmt.Errorf("auth: ping: %w", err)
 	}
-	p := &PostgresAPIKeyProvider{pool: pool, log: log, keys: map[string]Principal{}}
+	p := &PostgresAPIKeyProvider{pool: pool, log: log, keys: map[string]Principal{}, done: make(chan struct{})}
 	if err := p.Reload(ctx); err != nil {
 		pool.Close()
 		return nil, err
 	}
 	return p, nil
+}
+
+// StartRefresh launches a background goroutine that reloads the key snapshot
+// from the DB every interval, so keys created/revoked on other replicas take
+// effect here within one interval (multi-replica consistency). interval <= 0
+// disables it (single-replica). Idempotent effect via Close's guard.
+func (p *PostgresAPIKeyProvider) StartRefresh(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	refresh := p.refreshFn
+	if refresh == nil {
+		refresh = p.Reload
+	}
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := refresh(ctx); err != nil && p.log != nil {
+					p.log.Warn("auth: background key reload failed", zap.Error(err))
+				}
+				cancel()
+			case <-p.done:
+				return
+			}
+		}
+	}()
 }
 
 // Reload replaces the in-memory snapshot with the current enabled keys from the
@@ -159,7 +202,12 @@ func (p *PostgresAPIKeyProvider) ListKeys(ctx context.Context) ([]KeyInfo, error
 	return out, rows.Err()
 }
 
-// Close releases the connection pool.
+// Close stops the background refresh (if running) and releases the connection
+// pool. Safe to call once; subsequent calls are no-ops.
 func (p *PostgresAPIKeyProvider) Close() {
-	p.pool.Close()
+	p.closeOnce.Do(func() {
+		close(p.done)
+		p.wg.Wait()
+		p.pool.Close()
+	})
 }

@@ -29,6 +29,7 @@
 - **测试补齐**：`ee/auth`（`hashKey`）、`ee/quota`（`ConcurrencyLimiter` per-tenant/default/unlimited/幂等释放）、核心 `applyUsageTokens`（OpenAI/Anthropic/total 兜底）单测
 - **`/admin/*` 权限分级（RBAC）**：`Principal.Admin` + `auth.IsAdmin`；`api_keys.is_admin` 列（`migrations/002_api_keys_admin.sql`）；`/admin/keys`、`/admin/usage` 非 admin 返 **403**、无 key 返 401；bootstrap 由 `ee.auth.admin_keys` 列表标记管理员 key
 - **用量落库可靠性**：`PostgresSink` 写库失败改为**退避重试**（默认 3 次，200ms→400ms→800ms），耗尽才丢；丢弃不再静默——队列满 `dropped_full` / 重试耗尽 `dropped_write` 计数（`Stats()` + `Close` 汇总日志）；参数经 `SinkOptions` 可配（`ee.billing.{queue_size,batch_size,flush_interval_ms,max_retries}`，缺省即原值，零行为变更）；`NewPostgresSink` 签名不变（内部转 `NewPostgresSinkWithOptions`），`writeFn` seam 支持无库单测
+- **多副本 API key 一致性**：`PostgresAPIKeyProvider.StartRefresh(interval)` 后台按 `ee.auth.reload_interval_sec`（默认 30s，≤0 禁用）定时 `Reload`，另一副本上 `/admin/keys` 创建/吊销的 key 在一个周期内自动生效——本副本 `CreateKey`/`RevokeKey` 仍立即 Reload；`Close` 停 ticker（`done`+`wg`+`sync.Once`），`refreshFn` seam 支持无库单测（`-race`）；真机双副本 e2e：A 创建/吊销→B 刷新后跟随，全程 B 不重启
 
 ---
 
@@ -37,7 +38,7 @@
 - [ ] **用量不丢的强保证（WAL）**：当前突发过载/DB 长挂仍会丢弃（有计数、不静默）；若计费要求「一条不丢」，需落盘缓冲（WAL / 磁盘队列）重放——重量级，按需再上
 - [ ] **配额维度扩展**：现仅并发数，可加 QPS / token 配额（token 配额需读用量库）
 - [ ] **Admin 接口完善**：分页 / 按租户过滤 keys；用量导出（CSV）；审计谁改了 key
-- [ ] **多实例配置一致性**：API key 快照靠重启或显式 `Reload`，多副本下需要广播刷新（如 Redis pub/sub 或轮询 TTL）
+- [ ] **API key 近实时失效（pub/sub）**：现为轮询刷新（默认 30s 收敛，有界延迟）；若吊销需秒级跨副本生效，可加 Redis pub/sub 广播失效事件（各副本收到即 Reload）——引入 auth→redis 依赖 + 断连重订阅，按需再上
 
 ## 相关 OSS 待澄清项（见 TODO.md B 段，按需）
 - Azure OpenAI legacy（`?api-version=` + `api-key` 头）
@@ -54,6 +55,7 @@ ee:
       key-xxx: "tenant-a"
     admin_keys:          # 其中拥有 /admin/* 权限的 key 列表
       - "key-xxx"
+    reload_interval_sec: 30  # 多副本下后台刷新 key 快照间隔秒（默认 30，≤0=禁用/单副本）
   billing:
     dsn: "postgres://..."   # 亦可用环境变量 AIGIS_EE_BILLING_DSN（优先，密码不落盘）
     queue_size: 4096        # 异步写队列容量（0=默认 4096）
