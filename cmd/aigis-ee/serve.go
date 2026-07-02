@@ -90,10 +90,12 @@ var serveCmd = &cobra.Command{
 			}
 			defer keyProvider.Close()
 			// Bootstrap: seed any config-declared keys into the DB so a fresh
-			// deployment has a working key to call /admin/keys with. Idempotent
-			// (upsert), so it is safe on every restart.
+			// deployment has a working key to call /admin/keys with. Keys listed
+			// under ee.auth.admin_keys get admin privileges. Idempotent (upsert),
+			// so it is safe on every restart.
+			admins := adminKeys()
 			for rawKey, tenant := range apiKeys() {
-				if err := keyProvider.CreateKey(cmd.Context(), rawKey, tenant, tenant); err != nil {
+				if err := keyProvider.CreateKey(cmd.Context(), rawKey, tenant, tenant, admins[rawKey]); err != nil {
 					return fmt.Errorf("failed to seed API key: %w", err)
 				}
 			}
@@ -155,6 +157,16 @@ var serveCmd = &cobra.Command{
 // apiKeys reads the "ee.auth.api_keys" config section: a map of apiKey -> tenant.
 func apiKeys() map[string]string {
 	return viper.GetStringMapString("ee.auth.api_keys")
+}
+
+// adminKeys reads "ee.auth.admin_keys" (a list of raw keys that should be
+// granted admin privileges) into a set for O(1) lookup during bootstrap.
+func adminKeys() map[string]bool {
+	set := make(map[string]bool)
+	for _, k := range viper.GetStringSlice("ee.auth.admin_keys") {
+		set[k] = true
+	}
+	return set
 }
 
 // eeDSN resolves the shared Enterprise datastore DSN (auth registry + usage

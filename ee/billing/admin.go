@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"aigis/ee/auth"
 	"aigis/internal/server"
 )
 
@@ -29,6 +30,10 @@ func AdminMiddleware(sink *PostgresSink, log *zap.Logger) server.Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/admin/usage" {
 				next.ServeHTTP(w, r)
+				return
+			}
+			if !auth.IsAdmin(r.Context()) {
+				http.Error(w, "admin privileges required", http.StatusForbidden)
 				return
 			}
 			if r.Method != http.MethodGet {

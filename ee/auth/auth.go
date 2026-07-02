@@ -23,6 +23,10 @@ type tenantKey struct{}
 type Principal struct {
 	Tenant  string
 	Subject string
+	// Admin marks a privileged caller allowed to use the /admin/* management
+	// endpoints. Ordinary tenant keys have this false and are limited to the
+	// gateway.
+	Admin bool
 }
 
 // AuthProvider resolves a request into a Principal. Implementations decide the
@@ -36,6 +40,14 @@ type AuthProvider interface {
 func FromContext(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(tenantKey{}).(Principal)
 	return p, ok
+}
+
+// IsAdmin reports whether the request's authenticated caller holds admin
+// privileges (allowed to use /admin/* endpoints). A request with no resolved
+// principal is not an admin.
+func IsAdmin(ctx context.Context) bool {
+	p, ok := FromContext(ctx)
+	return ok && p.Admin
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>" header,

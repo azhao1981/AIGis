@@ -59,7 +59,7 @@ func NewPostgresAPIKeyProvider(ctx context.Context, dsn string, log *zap.Logger)
 // DB. Safe to call concurrently with Authenticate.
 func (p *PostgresAPIKeyProvider) Reload(ctx context.Context) error {
 	rows, err := p.pool.Query(ctx,
-		`SELECT key_hash, tenant, subject FROM api_keys WHERE enabled = TRUE`)
+		`SELECT key_hash, tenant, subject, is_admin FROM api_keys WHERE enabled = TRUE`)
 	if err != nil {
 		return fmt.Errorf("auth: load keys: %w", err)
 	}
@@ -68,10 +68,11 @@ func (p *PostgresAPIKeyProvider) Reload(ctx context.Context) error {
 	next := map[string]Principal{}
 	for rows.Next() {
 		var hash, tenant, subject string
-		if err := rows.Scan(&hash, &tenant, &subject); err != nil {
+		var admin bool
+		if err := rows.Scan(&hash, &tenant, &subject, &admin); err != nil {
 			return fmt.Errorf("auth: scan key: %w", err)
 		}
-		next[hash] = Principal{Tenant: tenant, Subject: subject}
+		next[hash] = Principal{Tenant: tenant, Subject: subject, Admin: admin}
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -106,16 +107,16 @@ func (p *PostgresAPIKeyProvider) Authenticate(r *http.Request) (Principal, error
 }
 
 // CreateKey inserts a new API key (storing only its hash) and refreshes the
-// snapshot so it is immediately usable. Returns the row-effective principal.
-func (p *PostgresAPIKeyProvider) CreateKey(ctx context.Context, rawKey, tenant, subject string) error {
+// snapshot so it is immediately usable. admin grants /admin/* privileges.
+func (p *PostgresAPIKeyProvider) CreateKey(ctx context.Context, rawKey, tenant, subject string, admin bool) error {
 	if rawKey == "" || tenant == "" {
 		return fmt.Errorf("auth: key and tenant are required")
 	}
 	_, err := p.pool.Exec(ctx,
-		`INSERT INTO api_keys (key_hash, tenant, subject) VALUES ($1, $2, $3)
+		`INSERT INTO api_keys (key_hash, tenant, subject, is_admin) VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (key_hash) DO UPDATE SET tenant = EXCLUDED.tenant,
-		     subject = EXCLUDED.subject, enabled = TRUE`,
-		hashKey(rawKey), tenant, subject)
+		     subject = EXCLUDED.subject, is_admin = EXCLUDED.is_admin, enabled = TRUE`,
+		hashKey(rawKey), tenant, subject, admin)
 	if err != nil {
 		return fmt.Errorf("auth: create key: %w", err)
 	}
@@ -136,12 +137,13 @@ type KeyInfo struct {
 	Tenant  string `json:"tenant"`
 	Subject string `json:"subject"`
 	Enabled bool   `json:"enabled"`
+	Admin   bool   `json:"admin"`
 }
 
 // ListKeys returns the registered keys' metadata (never the hashes/secrets).
 func (p *PostgresAPIKeyProvider) ListKeys(ctx context.Context) ([]KeyInfo, error) {
 	rows, err := p.pool.Query(ctx,
-		`SELECT tenant, subject, enabled FROM api_keys ORDER BY tenant, subject`)
+		`SELECT tenant, subject, enabled, is_admin FROM api_keys ORDER BY tenant, subject`)
 	if err != nil {
 		return nil, fmt.Errorf("auth: list keys: %w", err)
 	}
@@ -149,7 +151,7 @@ func (p *PostgresAPIKeyProvider) ListKeys(ctx context.Context) ([]KeyInfo, error
 	var out []KeyInfo
 	for rows.Next() {
 		var k KeyInfo
-		if err := rows.Scan(&k.Tenant, &k.Subject, &k.Enabled); err != nil {
+		if err := rows.Scan(&k.Tenant, &k.Subject, &k.Enabled, &k.Admin); err != nil {
 			return nil, fmt.Errorf("auth: scan key info: %w", err)
 		}
 		out = append(out, k)

@@ -29,6 +29,10 @@ func AdminMiddleware(p *PostgresAPIKeyProvider, log *zap.Logger) server.Middlewa
 				next.ServeHTTP(w, r)
 				return
 			}
+			if !IsAdmin(r.Context()) {
+				http.Error(w, "admin privileges required", http.StatusForbidden)
+				return
+			}
 			switch r.Method {
 			case http.MethodGet:
 				listKeys(w, r, p, log)
@@ -47,6 +51,7 @@ type keyRequest struct {
 	Key     string `json:"key"`
 	Tenant  string `json:"tenant"`
 	Subject string `json:"subject"`
+	Admin   bool   `json:"admin"`
 }
 
 func listKeys(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, log *zap.Logger) {
@@ -68,13 +73,13 @@ func createKey(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	if err := p.CreateKey(r.Context(), req.Key, req.Tenant, req.Subject); err != nil {
+	if err := p.CreateKey(r.Context(), req.Key, req.Tenant, req.Subject, req.Admin); err != nil {
 		writeErr(w, log, http.StatusBadRequest, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(map[string]any{"tenant": req.Tenant, "subject": req.Subject})
+	_ = json.NewEncoder(w).Encode(map[string]any{"tenant": req.Tenant, "subject": req.Subject, "admin": req.Admin})
 }
 
 func revokeKey(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, log *zap.Logger) {
