@@ -6,8 +6,10 @@
 package billing
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"go.uber.org/zap"
@@ -21,10 +23,11 @@ import (
 // the gateway. It is the sole seam between the EE billing admin API and the OSS
 // core — the core exposes no route-registration hook, so we intercept by path.
 //
-//	GET /admin/usage?tenant=&from=&to=&granularity=hour|day|month
+//	GET /admin/usage?tenant=&from=&to=&granularity=hour|day|month&format=json|csv
 //	  tenant      optional; empty = all tenants
 //	  from,to     RFC3339 timestamps; default = last 30 days
 //	  granularity date_trunc unit; default = day
+//	  format      json (default) or csv (downloadable attachment)
 func AdminMiddleware(sink *PostgresSink, log *zap.Logger) server.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +83,30 @@ func handleUsage(w http.ResponseWriter, r *http.Request, sink *PostgresSink, log
 		rows = []UsageRow{}
 	}
 
+	if q.Get("format") == "csv" {
+		writeUsageCSV(w, rows)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"usage": rows})
+}
+
+// writeUsageCSV streams the usage rows as a downloadable CSV (one header row +
+// one row per bucket), for spreadsheet/finance workflows.
+func writeUsageCSV(w http.ResponseWriter, rows []UsageRow) {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="usage.csv"`)
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"bucket", "tenant", "requests", "prompt_tokens", "completion_tokens", "total_tokens"})
+	for _, row := range rows {
+		_ = cw.Write([]string{
+			row.Bucket.Format(time.RFC3339),
+			row.Tenant,
+			strconv.FormatInt(row.Requests, 10),
+			strconv.FormatInt(row.PromptTokens, 10),
+			strconv.FormatInt(row.CompletionTokens, 10),
+			strconv.FormatInt(row.TotalTokens, 10),
+		})
+	}
+	cw.Flush()
 }

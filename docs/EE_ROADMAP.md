@@ -31,6 +31,7 @@
 - **用量落库可靠性**：`PostgresSink` 写库失败改为**退避重试**（默认 3 次，200ms→400ms→800ms），耗尽才丢；丢弃不再静默——队列满 `dropped_full` / 重试耗尽 `dropped_write` 计数（`Stats()` + `Close` 汇总日志）；参数经 `SinkOptions` 可配（`ee.billing.{queue_size,batch_size,flush_interval_ms,max_retries}`，缺省即原值，零行为变更）；`NewPostgresSink` 签名不变（内部转 `NewPostgresSinkWithOptions`），`writeFn` seam 支持无库单测
 - **多副本 API key 一致性**：`PostgresAPIKeyProvider.StartRefresh(interval)` 后台按 `ee.auth.reload_interval_sec`（默认 30s，≤0 禁用）定时 `Reload`，另一副本上 `/admin/keys` 创建/吊销的 key 在一个周期内自动生效——本副本 `CreateKey`/`RevokeKey` 仍立即 Reload；`Close` 停 ticker（`done`+`wg`+`sync.Once`），`refreshFn` seam 支持无库单测（`-race`）；真机双副本 e2e：A 创建/吊销→B 刷新后跟随，全程 B 不重启
 - **API key 变更审计**：`ee/auth` `api_key_audit` 表（`migrations/003_api_key_audit.sql`）记录谁在何时创建/吊销了哪个 key——`CreateKey`/`RevokeKey` 增 `Actor` 参数，成功后写一行审计（**仅存 key_hash，绝不落明文**；actor 取自请求 Principal，bootstrap 用 `subject="bootstrap"`）；写审计失败**不回滚**主操作（key 已改成功），`log.Error` 响亮留痕（fail-loud）；`GET /admin/keys/audit?key=&action=&limit=`（admin only，`?key=` 明文入参先哈希再比对），`ListAudit` 按 `ts DESC`；真机 e2e：create/revoke 各留痕、actor 正确、按 key/action 过滤精确
+- **Admin 接口完善**：用量 CSV 导出 `GET /admin/usage?...&format=csv`（`text/csv` 附件，复用 `QueryUsage`，表头 + 每桶一行）；keys 按租户过滤 + 分页 `GET /admin/keys?tenant=&limit=&offset=`（`ListKeys(KeyQuery)`，`WHERE ($1='' OR tenant=$1) LIMIT/OFFSET`，无参=原全量行为，零破坏）；审计同加 `offset` 分页；真机 e2e：CSV 头/行正确、tenant 过滤命中、limit/offset 翻页精确
 
 ---
 
@@ -38,7 +39,6 @@
 
 - [ ] **用量不丢的强保证（WAL）**：当前突发过载/DB 长挂仍会丢弃（有计数、不静默）；若计费要求「一条不丢」，需落盘缓冲（WAL / 磁盘队列）重放——重量级，按需再上
 - [ ] **配额维度扩展**：现仅并发数，可加 QPS / token 配额（token 配额需读用量库）
-- [ ] **Admin 接口完善**：分页 / 按租户过滤 keys；用量导出（CSV）（key 变更审计已落地，见上）
 - [ ] **API key 近实时失效（pub/sub）**：现为轮询刷新（默认 30s 收敛，有界延迟）；若吊销需秒级跨副本生效，可加 Redis pub/sub 广播失效事件（各副本收到即 Reload）——引入 auth→redis 依赖 + 断连重订阅，按需再上
 
 ## 相关 OSS 待澄清项（见 TODO.md B 段，按需）

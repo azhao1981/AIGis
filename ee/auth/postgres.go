@@ -202,11 +202,12 @@ func (p *PostgresAPIKeyProvider) writeAudit(ctx context.Context, action, keyHash
 }
 
 // AuditFilter narrows an audit query. Zero fields mean "no filter"; Limit <= 0
-// falls back to a sane default.
+// falls back to a sane default; Offset pages the result.
 type AuditFilter struct {
 	KeyHash string
 	Action  string
 	Limit   int
+	Offset  int
 }
 
 // AuditRow is one recorded key change (hash only, no secret material).
@@ -227,12 +228,16 @@ func (p *PostgresAPIKeyProvider) ListAudit(ctx context.Context, f AuditFilter) (
 	if limit <= 0 {
 		limit = 100
 	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := p.pool.Query(ctx,
 		`SELECT ts, action, key_hash, target_tenant, target_admin, actor_subject, actor_tenant
 		 FROM api_key_audit
 		 WHERE ($1 = '' OR key_hash = $1) AND ($2 = '' OR action = $2)
-		 ORDER BY ts DESC LIMIT $3`,
-		f.KeyHash, f.Action, limit)
+		 ORDER BY ts DESC LIMIT $3 OFFSET $4`,
+		f.KeyHash, f.Action, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("auth: list audit: %w", err)
 	}
@@ -262,10 +267,30 @@ type KeyInfo struct {
 	Admin   bool   `json:"admin"`
 }
 
-// ListKeys returns the registered keys' metadata (never the hashes/secrets).
-func (p *PostgresAPIKeyProvider) ListKeys(ctx context.Context) ([]KeyInfo, error) {
+// KeyQuery narrows/pages a ListKeys call. Tenant is optional (empty = all);
+// Limit <= 0 falls back to a default; Offset skips that many rows for paging.
+type KeyQuery struct {
+	Tenant string
+	Limit  int
+	Offset int
+}
+
+// ListKeys returns the registered keys' metadata (never the hashes/secrets),
+// optionally filtered by tenant and paged.
+func (p *PostgresAPIKeyProvider) ListKeys(ctx context.Context, q KeyQuery) ([]KeyInfo, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	offset := q.Offset
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := p.pool.Query(ctx,
-		`SELECT tenant, subject, enabled, is_admin FROM api_keys ORDER BY tenant, subject`)
+		`SELECT tenant, subject, enabled, is_admin FROM api_keys
+		 WHERE ($1 = '' OR tenant = $1)
+		 ORDER BY tenant, subject LIMIT $2 OFFSET $3`,
+		q.Tenant, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("auth: list keys: %w", err)
 	}

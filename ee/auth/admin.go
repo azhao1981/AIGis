@@ -20,10 +20,10 @@ import (
 // server.Middleware (path interception), keeping the ee -> core dependency
 // one-way.
 //
-//	GET    /admin/keys                       list keys (metadata only)
-//	POST   /admin/keys  {key,tenant,subject} create/enable a key
-//	DELETE /admin/keys  {key}                revoke (soft-disable) a key
-//	GET    /admin/keys/audit ?key=&action=&limit=  key-change audit trail
+//	GET    /admin/keys ?tenant=&limit=&offset=  list keys (metadata only, paged)
+//	POST   /admin/keys  {key,tenant,subject}    create/enable a key
+//	DELETE /admin/keys  {key}                   revoke (soft-disable) a key
+//	GET    /admin/keys/audit ?key=&action=&limit=&offset=  key-change audit trail
 func AdminMiddleware(p *PostgresAPIKeyProvider, log *zap.Logger) server.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +75,12 @@ type keyRequest struct {
 }
 
 func listKeys(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, log *zap.Logger) {
-	keys, err := p.ListKeys(r.Context())
+	q := r.URL.Query()
+	keys, err := p.ListKeys(r.Context(), KeyQuery{
+		Tenant: q.Get("tenant"),
+		Limit:  queryInt(q.Get("limit")),
+		Offset: queryInt(q.Get("offset")),
+	})
 	if err != nil {
 		writeErr(w, log, http.StatusInternalServerError, err)
 		return
@@ -115,18 +120,28 @@ func revokeKey(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// queryInt parses a query-string integer, returning 0 for empty/invalid input
+// (the ListKeys/ListAudit defaults then apply).
+func queryInt(v string) int {
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // listAudit returns key-change audit rows. Optional filters: ?key= (plaintext,
 // hashed before matching so raw keys never appear in logs/URLs on the DB side),
-// ?action=create|revoke, ?limit=.
+// ?action=create|revoke, ?limit=, ?offset=.
 func listAudit(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, log *zap.Logger) {
-	f := AuditFilter{Action: r.URL.Query().Get("action")}
-	if raw := r.URL.Query().Get("key"); raw != "" {
-		f.KeyHash = AuditKeyHash(raw)
+	q := r.URL.Query()
+	f := AuditFilter{
+		Action: q.Get("action"),
+		Limit:  queryInt(q.Get("limit")),
+		Offset: queryInt(q.Get("offset")),
 	}
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			f.Limit = n
-		}
+	if raw := q.Get("key"); raw != "" {
+		f.KeyHash = AuditKeyHash(raw)
 	}
 	rows, err := p.ListAudit(r.Context(), f)
 	if err != nil {

@@ -113,3 +113,37 @@ func TestAuditFilterLimitDefault(t *testing.T) {
 		t.Fatalf("explicit limit changed: got %d, want 25", got)
 	}
 }
+
+func TestQueryInt(t *testing.T) {
+	cases := map[string]int{"": 0, "abc": 0, "0": 0, "25": 25, "-3": -3}
+	for in, want := range cases {
+		if got := queryInt(in); got != want {
+			t.Fatalf("queryInt(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestKeyQueryPagingNormalization(t *testing.T) {
+	// Mirror the LIMIT/OFFSET normalization ListKeys applies (DB-free guard):
+	// Limit<=0 -> 100, Offset<0 -> 0, explicit values pass through.
+	norm := func(q KeyQuery) (int, int) {
+		limit := q.Limit
+		if limit <= 0 {
+			limit = 100
+		}
+		offset := q.Offset
+		if offset < 0 {
+			offset = 0
+		}
+		return limit, offset
+	}
+	if l, o := norm(KeyQuery{}); l != 100 || o != 0 {
+		t.Fatalf("zero KeyQuery -> limit=%d offset=%d, want 100/0", l, o)
+	}
+	if l, o := norm(KeyQuery{Limit: -1, Offset: -5}); l != 100 || o != 0 {
+		t.Fatalf("negative KeyQuery -> limit=%d offset=%d, want 100/0", l, o)
+	}
+	if l, o := norm(KeyQuery{Limit: 10, Offset: 20}); l != 10 || o != 20 {
+		t.Fatalf("explicit KeyQuery changed: limit=%d offset=%d, want 10/20", l, o)
+	}
+}
