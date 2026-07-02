@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -113,7 +114,7 @@ var serveCmd = &cobra.Command{
 		// Persist usage to PostgreSQL/TimescaleDB when a DSN is configured;
 		// otherwise fall back to the in-memory sink (aggregate + log only).
 		if dsn != "" {
-			pgSink, err := billing.NewPostgresSink(cmd.Context(), dsn, globalLogger)
+			pgSink, err := billing.NewPostgresSinkWithOptions(cmd.Context(), dsn, globalLogger, billingOptions())
 			if err != nil {
 				return fmt.Errorf("failed to init billing store: %w", err)
 			}
@@ -178,6 +179,23 @@ func eeDSN() string {
 		return dsn
 	}
 	return viper.GetString("ee.billing.dsn")
+}
+
+// billingOptions reads the async usage-writer tuning from config. All keys are
+// optional; unset fields fall back to the billing package defaults (zero
+// behaviour change).
+//
+//	ee.billing.queue_size          -> buffered event channel capacity
+//	ee.billing.batch_size          -> events per DB round-trip
+//	ee.billing.flush_interval_ms   -> periodic flush tick (milliseconds)
+//	ee.billing.max_retries         -> batch write retries on DB error
+func billingOptions() billing.SinkOptions {
+	return billing.SinkOptions{
+		QueueSize:     viper.GetInt("ee.billing.queue_size"),
+		BatchSize:     viper.GetInt("ee.billing.batch_size"),
+		FlushInterval: time.Duration(viper.GetInt("ee.billing.flush_interval_ms")) * time.Millisecond,
+		MaxRetries:    viper.GetInt("ee.billing.max_retries"),
+	}
 }
 
 // quotaConfig reads per-tenant concurrency limits from config:

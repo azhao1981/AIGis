@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,7 +25,47 @@ const (
 	defaultBatchSize     = 100
 	defaultFlushInterval = 2 * time.Second
 	defaultQueueSize     = 4096
+	defaultMaxRetries    = 3
+	retryBaseDelay       = 200 * time.Millisecond
 )
+
+// SinkOptions tunes the async writer. A zero value is filled with the package
+// defaults by withDefaults, so callers may set only the fields they care about.
+type SinkOptions struct {
+	QueueSize     int           // buffered channel capacity (0 = default)
+	BatchSize     int           // events per DB round-trip (0 = default)
+	FlushInterval time.Duration // periodic flush tick (0 = default)
+	MaxRetries    int           // batch write retries on DB error (<0 = none, 0 = default)
+}
+
+func (o SinkOptions) withDefaults() SinkOptions {
+	if o.QueueSize <= 0 {
+		o.QueueSize = defaultQueueSize
+	}
+	if o.BatchSize <= 0 {
+		o.BatchSize = defaultBatchSize
+	}
+	if o.FlushInterval <= 0 {
+		o.FlushInterval = defaultFlushInterval
+	}
+	if o.MaxRetries == 0 {
+		o.MaxRetries = defaultMaxRetries
+	}
+	if o.MaxRetries < 0 {
+		o.MaxRetries = 0
+	}
+	return o
+}
+
+// SinkStats is a snapshot of the sink's reliability counters. Dropped events are
+// counted (never silent): Enqueued is total accepted, DroppedFull is events lost
+// because the queue was full (DB slow/down + backpressure), DroppedWrite is
+// events lost because a batch exhausted its write retries.
+type SinkStats struct {
+	Enqueued     int64 `json:"enqueued"`
+	DroppedFull  int64 `json:"dropped_full"`
+	DroppedWrite int64 `json:"dropped_write"`
+}
 
 // PostgresSink is a usage.Sink that persists events to PostgreSQL / TimescaleDB.
 // It writes ONLY standard SQL (a plain INSERT), so it is unaware of whether the
@@ -43,15 +84,35 @@ type PostgresSink struct {
 
 	batchSize     int
 	flushInterval time.Duration
+	maxRetries    int
+
+	// writeFn performs the actual persistence of a batch. Defaults to flushToDB;
+	// tests swap it to simulate DB failures without a real database.
+	writeFn func([]usage.Event) error
+
+	// Reliability counters (never drop silently). Read via Stats.
+	enqueued     atomic.Int64
+	droppedFull  atomic.Int64
+	droppedWrite atomic.Int64
 
 	closeOnce sync.Once
 	done      chan struct{}
 }
 
 // NewPostgresSink connects to the given DSN, verifies connectivity, and starts
-// the background flush worker. Call Close to drain and shut down. The caller is
-// responsible for having applied migrations/001_usage_events.sql beforehand.
+// the background flush worker with default options. Call Close to drain and shut
+// down. The caller is responsible for having applied
+// migrations/001_usage_events.sql beforehand.
 func NewPostgresSink(ctx context.Context, dsn string, log *zap.Logger) (*PostgresSink, error) {
+	return NewPostgresSinkWithOptions(ctx, dsn, log, SinkOptions{})
+}
+
+// NewPostgresSinkWithOptions is like NewPostgresSink but lets the caller tune the
+// async writer (queue size, batch size, flush interval, write retries). Zero
+// fields in opts fall back to the package defaults.
+func NewPostgresSinkWithOptions(ctx context.Context, dsn string, log *zap.Logger, opts SinkOptions) (*PostgresSink, error) {
+	opts = opts.withDefaults()
+
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("billing: connect: %w", err)
@@ -66,9 +127,10 @@ func NewPostgresSink(ctx context.Context, dsn string, log *zap.Logger) (*Postgre
 	s := &PostgresSink{
 		pool:          pool,
 		log:           log,
-		queue:         make(chan usage.Event, defaultQueueSize),
-		batchSize:     defaultBatchSize,
-		flushInterval: defaultFlushInterval,
+		queue:         make(chan usage.Event, opts.QueueSize),
+		batchSize:     opts.BatchSize,
+		flushInterval: opts.FlushInterval,
+		maxRetries:    opts.MaxRetries,
 		done:          make(chan struct{}),
 	}
 	s.wg.Add(1)
@@ -77,18 +139,31 @@ func NewPostgresSink(ctx context.Context, dsn string, log *zap.Logger) (*Postgre
 }
 
 // Record implements usage.Sink. It enqueues the event without blocking; if the
-// buffer is full (DB slow/down) the event is dropped with a warning rather than
-// stalling the request path — metering must never degrade the gateway.
+// buffer is full (DB slow/down) the event is dropped and counted (never silent)
+// rather than stalling the request path — metering must never degrade the
+// gateway.
 func (s *PostgresSink) Record(_ context.Context, e usage.Event) {
 	select {
 	case s.queue <- e:
+		s.enqueued.Add(1)
 	default:
+		n := s.droppedFull.Add(1)
 		if s.log != nil {
 			s.log.Warn("billing: usage queue full, dropping event",
 				zap.String("tenant", e.Tenant),
 				zap.String("request_id", e.RequestID),
+				zap.Int64("dropped_full_total", n),
 			)
 		}
+	}
+}
+
+// Stats returns a snapshot of the reliability counters.
+func (s *PostgresSink) Stats() SinkStats {
+	return SinkStats{
+		Enqueued:     s.enqueued.Load(),
+		DroppedFull:  s.droppedFull.Load(),
+		DroppedWrite: s.droppedWrite.Load(),
 	}
 }
 
@@ -144,8 +219,46 @@ const insertSQL = `INSERT INTO usage_events
 	 prompt_tokens, completion_tokens, total_tokens, streamed, success, duration_ms)
 	VALUES (now(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
 
-// writeBatch persists a slice of events in one round-trip using pgx.Batch.
+// writeBatch persists a slice of events, retrying transient DB errors with
+// exponential backoff before giving up. Only when all attempts fail are the
+// events counted as dropped (never silent) so no data loss goes unnoticed.
 func (s *PostgresSink) writeBatch(events []usage.Event) {
+	write := s.writeFn
+	if write == nil {
+		write = s.flushToDB
+	}
+
+	var err error
+	for attempt := 0; attempt <= s.maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(retryBaseDelay << (attempt - 1))
+		}
+		if err = write(events); err == nil {
+			return
+		}
+		if s.log != nil {
+			s.log.Warn("billing: batch insert failed, will retry",
+				zap.Error(err),
+				zap.Int("attempt", attempt+1),
+				zap.Int("max_attempts", s.maxRetries+1),
+				zap.Int("batch_size", len(events)),
+			)
+		}
+	}
+
+	n := s.droppedWrite.Add(int64(len(events)))
+	if s.log != nil {
+		s.log.Error("billing: batch insert failed after retries, dropping events",
+			zap.Error(err),
+			zap.Int("batch_size", len(events)),
+			zap.Int64("dropped_write_total", n),
+		)
+	}
+}
+
+// flushToDB is the real DB write: one round-trip via pgx.Batch. It is the
+// default writer; tests may swap s.writeFn to simulate failures.
+func (s *PostgresSink) flushToDB(events []usage.Event) error {
 	batch := &pgx.Batch{}
 	for _, e := range events {
 		batch.Queue(insertSQL,
@@ -162,12 +275,10 @@ func (s *PostgresSink) writeBatch(events []usage.Event) {
 	defer br.Close()
 	for range events {
 		if _, err := br.Exec(); err != nil {
-			if s.log != nil {
-				s.log.Error("billing: batch insert failed", zap.Error(err), zap.Int("batch_size", len(events)))
-			}
-			return
+			return err
 		}
 	}
+	return nil
 }
 
 // UsageRow is one aggregated usage bucket returned by QueryUsage.
@@ -244,6 +355,14 @@ func (s *PostgresSink) Close() {
 	s.closeOnce.Do(func() {
 		close(s.done)
 		s.wg.Wait()
+		if s.log != nil {
+			st := s.Stats()
+			s.log.Info("billing: sink closed",
+				zap.Int64("enqueued", st.Enqueued),
+				zap.Int64("dropped_full", st.DroppedFull),
+				zap.Int64("dropped_write", st.DroppedWrite),
+			)
+		}
 		s.pool.Close()
 	})
 }

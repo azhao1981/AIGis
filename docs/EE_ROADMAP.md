@@ -28,12 +28,13 @@
 ### Hardening — 加固
 - **测试补齐**：`ee/auth`（`hashKey`）、`ee/quota`（`ConcurrencyLimiter` per-tenant/default/unlimited/幂等释放）、核心 `applyUsageTokens`（OpenAI/Anthropic/total 兜底）单测
 - **`/admin/*` 权限分级（RBAC）**：`Principal.Admin` + `auth.IsAdmin`；`api_keys.is_admin` 列（`migrations/002_api_keys_admin.sql`）；`/admin/keys`、`/admin/usage` 非 admin 返 **403**、无 key 返 401；bootstrap 由 `ee.auth.admin_keys` 列表标记管理员 key
+- **用量落库可靠性**：`PostgresSink` 写库失败改为**退避重试**（默认 3 次，200ms→400ms→800ms），耗尽才丢；丢弃不再静默——队列满 `dropped_full` / 重试耗尽 `dropped_write` 计数（`Stats()` + `Close` 汇总日志）；参数经 `SinkOptions` 可配（`ee.billing.{queue_size,batch_size,flush_interval_ms,max_retries}`，缺省即原值，零行为变更）；`NewPostgresSink` 签名不变（内部转 `NewPostgresSinkWithOptions`），`writeFn` seam 支持无库单测
 
 ---
 
 ## 待办（TODO / 观察项，按需）
 
-- [ ] **用量落库可靠性**：`PostgresSink` 队列满目前是「丢弃 + 告警」；若计费要求不丢，加落盘缓冲 / 重试
+- [ ] **用量不丢的强保证（WAL）**：当前突发过载/DB 长挂仍会丢弃（有计数、不静默）；若计费要求「一条不丢」，需落盘缓冲（WAL / 磁盘队列）重放——重量级，按需再上
 - [ ] **配额维度扩展**：现仅并发数，可加 QPS / token 配额（token 配额需读用量库）
 - [ ] **Admin 接口完善**：分页 / 按租户过滤 keys；用量导出（CSV）；审计谁改了 key
 - [ ] **多实例配置一致性**：API key 快照靠重启或显式 `Reload`，多副本下需要广播刷新（如 Redis pub/sub 或轮询 TTL）
@@ -55,6 +56,10 @@ ee:
       - "key-xxx"
   billing:
     dsn: "postgres://..."   # 亦可用环境变量 AIGIS_EE_BILLING_DSN（优先，密码不落盘）
+    queue_size: 4096        # 异步写队列容量（0=默认 4096）
+    batch_size: 100         # 每次入库批量条数（0=默认 100）
+    flush_interval_ms: 2000 # 定时刷盘间隔毫秒（0=默认 2000）
+    max_retries: 3          # 批量写失败退避重试次数（0=默认 3；负数=不重试）
   quota:
     default: 0              # 每租户并发上限，0=不限
     per_tenant:            # 单租户覆盖
