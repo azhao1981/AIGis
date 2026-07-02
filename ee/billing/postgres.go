@@ -170,6 +170,74 @@ func (s *PostgresSink) writeBatch(events []usage.Event) {
 	}
 }
 
+// UsageRow is one aggregated usage bucket returned by QueryUsage.
+type UsageRow struct {
+	Bucket           time.Time `json:"bucket"`
+	Tenant           string    `json:"tenant"`
+	Requests         int64     `json:"requests"`
+	PromptTokens     int64     `json:"prompt_tokens"`
+	CompletionTokens int64     `json:"completion_tokens"`
+	TotalTokens      int64     `json:"total_tokens"`
+}
+
+// UsageQuery constrains a QueryUsage call. Tenant is optional (empty = all
+// tenants); From/To bound the ts range; Granularity is a date_trunc unit
+// ("hour"/"day"/"month", default "day").
+type UsageQuery struct {
+	Tenant      string
+	From        time.Time
+	To          time.Time
+	Granularity string
+}
+
+// allowedGranularity guards the date_trunc unit against SQL injection — the unit
+// cannot be a bound parameter, so it must come from this fixed allow-list.
+var allowedGranularity = map[string]bool{"hour": true, "day": true, "month": true}
+
+// QueryUsage returns per-tenant, per-bucket usage aggregates over the given
+// window. It uses ONLY standard SQL (date_trunc, not Timescale's time_bucket),
+// so it stays portable to a plain PostgreSQL table.
+func (s *PostgresSink) QueryUsage(ctx context.Context, q UsageQuery) ([]UsageRow, error) {
+	gran := q.Granularity
+	if gran == "" {
+		gran = "day"
+	}
+	if !allowedGranularity[gran] {
+		return nil, fmt.Errorf("billing: invalid granularity %q", q.Granularity)
+	}
+	if q.To.IsZero() {
+		q.To = time.Now()
+	}
+	if q.From.IsZero() {
+		q.From = q.To.Add(-30 * 24 * time.Hour)
+	}
+
+	const queryTmpl = `SELECT date_trunc($1, ts) AS bucket, tenant,
+		count(*) AS requests,
+		coalesce(sum(prompt_tokens),0), coalesce(sum(completion_tokens),0), coalesce(sum(total_tokens),0)
+	FROM usage_events
+	WHERE ts >= $2 AND ts < $3 AND ($4 = '' OR tenant = $4)
+	GROUP BY bucket, tenant
+	ORDER BY bucket, tenant`
+
+	rows, err := s.pool.Query(ctx, queryTmpl, gran, q.From, q.To, q.Tenant)
+	if err != nil {
+		return nil, fmt.Errorf("billing: query usage: %w", err)
+	}
+	defer rows.Close()
+
+	var out []UsageRow
+	for rows.Next() {
+		var r UsageRow
+		if err := rows.Scan(&r.Bucket, &r.Tenant, &r.Requests,
+			&r.PromptTokens, &r.CompletionTokens, &r.TotalTokens); err != nil {
+			return nil, fmt.Errorf("billing: scan usage row: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // Close stops the worker, drains the queue with a final flush, and closes the
 // connection pool. Safe to call once; subsequent calls are no-ops.
 func (s *PostgresSink) Close() {

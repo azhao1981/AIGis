@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -75,27 +76,51 @@ var serveCmd = &cobra.Command{
 			return fmt.Errorf("failed to create server: %w", err)
 		}
 
+		dsn := eeDSN()
+
 		// --- Enterprise layer: inbound authentication / multi-tenant ---
-		// Register the auth middleware only when API keys are configured, so an
-		// unconfigured EE binary still boots (open by default, like the OSS core).
-		if keys := apiKeys(); len(keys) > 0 {
+		// Prefer the DB-backed key registry when a DSN is set (centrally managed,
+		// revocable, keys stored as hashes) and expose /admin/keys to manage it.
+		// Otherwise fall back to the static config map, or leave the gateway open
+		// if neither is configured — like the OSS core.
+		if dsn != "" {
+			keyProvider, err := auth.NewPostgresAPIKeyProvider(cmd.Context(), dsn, globalLogger)
+			if err != nil {
+				return fmt.Errorf("failed to init auth store: %w", err)
+			}
+			defer keyProvider.Close()
+			// Bootstrap: seed any config-declared keys into the DB so a fresh
+			// deployment has a working key to call /admin/keys with. Idempotent
+			// (upsert), so it is safe on every restart.
+			for rawKey, tenant := range apiKeys() {
+				if err := keyProvider.CreateKey(cmd.Context(), rawKey, tenant, tenant); err != nil {
+					return fmt.Errorf("failed to seed API key: %w", err)
+				}
+			}
+			srv.Use(auth.Middleware(keyProvider))
+			srv.Use(auth.AdminMiddleware(keyProvider, globalLogger))
+			globalLogger.Sugar().Info("EE auth: API keys from DB; /admin/keys enabled")
+		} else if keys := apiKeys(); len(keys) > 0 {
 			srv.Use(auth.Middleware(auth.NewStaticAPIKeyProvider(keys)))
-			globalLogger.Sugar().Infof("EE auth enabled: %d API key(s) loaded", len(keys))
+			globalLogger.Sugar().Infof("EE auth enabled: %d API key(s) loaded from config", len(keys))
 		} else {
-			globalLogger.Sugar().Warn("EE auth NOT configured (ee.auth.api_keys empty) — gateway is open")
+			globalLogger.Sugar().Warn("EE auth NOT configured (no DSN, ee.auth.api_keys empty) — gateway is open")
 		}
 
 		// --- Enterprise layer: usage metering / billing ---
 		// Persist usage to PostgreSQL/TimescaleDB when a DSN is configured;
 		// otherwise fall back to the in-memory sink (aggregate + log only).
-		if dsn := viper.GetString("ee.billing.dsn"); dsn != "" {
+		if dsn != "" {
 			pgSink, err := billing.NewPostgresSink(cmd.Context(), dsn, globalLogger)
 			if err != nil {
 				return fmt.Errorf("failed to init billing store: %w", err)
 			}
 			defer pgSink.Close()
 			srv.SetUsageSink(pgSink)
-			globalLogger.Sugar().Info("EE billing: usage persisted to PostgreSQL")
+			// Read-only usage query API (GET /admin/usage). Registered after auth
+			// so admin calls require a valid API key.
+			srv.Use(billing.AdminMiddleware(pgSink, globalLogger))
+			globalLogger.Sugar().Info("EE billing: usage persisted to PostgreSQL; /admin/usage enabled")
 		} else {
 			srv.SetUsageSink(billing.NewMeteringSink(globalLogger))
 			globalLogger.Sugar().Warn("EE billing: ee.billing.dsn not set — usage kept in memory only")
@@ -103,10 +128,24 @@ var serveCmd = &cobra.Command{
 
 		// --- Enterprise layer: per-tenant quota / rate limiting ---
 		// Enforce a per-tenant in-flight ceiling when configured (0 = unlimited).
+		// With ee.quota.redis_addr set, the ceiling is shared across all replicas
+		// (distributed); otherwise it is per-process (in-memory).
 		perTenant, defLimit := quotaConfig()
 		if defLimit > 0 || len(perTenant) > 0 {
-			srv.SetQuotaLimiter(eequota.NewConcurrencyLimiter(perTenant, defLimit))
-			globalLogger.Sugar().Infof("EE quota enabled: default=%d, per-tenant overrides=%d", defLimit, len(perTenant))
+			if addr := viper.GetString("ee.quota.redis_addr"); addr != "" {
+				rl, err := eequota.NewRedisLimiter(cmd.Context(), addr,
+					viper.GetString("ee.quota.redis_password"), viper.GetInt("ee.quota.redis_db"),
+					perTenant, defLimit, globalLogger)
+				if err != nil {
+					return fmt.Errorf("failed to init distributed quota: %w", err)
+				}
+				defer rl.Close()
+				srv.SetQuotaLimiter(rl)
+				globalLogger.Sugar().Infof("EE quota enabled (distributed via Redis): default=%d, per-tenant overrides=%d", defLimit, len(perTenant))
+			} else {
+				srv.SetQuotaLimiter(eequota.NewConcurrencyLimiter(perTenant, defLimit))
+				globalLogger.Sugar().Infof("EE quota enabled (in-memory, single-replica): default=%d, per-tenant overrides=%d", defLimit, len(perTenant))
+			}
 		}
 
 		return srv.Start()
@@ -116,6 +155,17 @@ var serveCmd = &cobra.Command{
 // apiKeys reads the "ee.auth.api_keys" config section: a map of apiKey -> tenant.
 func apiKeys() map[string]string {
 	return viper.GetStringMapString("ee.auth.api_keys")
+}
+
+// eeDSN resolves the shared Enterprise datastore DSN (auth registry + usage
+// store), preferring the AIGIS_EE_BILLING_DSN environment variable over the
+// ee.billing.dsn config key so the DB password never has to be committed to
+// config.yaml.
+func eeDSN() string {
+	if dsn := os.Getenv("AIGIS_EE_BILLING_DSN"); dsn != "" {
+		return dsn
+	}
+	return viper.GetString("ee.billing.dsn")
 }
 
 // quotaConfig reads per-tenant concurrency limits from config:
