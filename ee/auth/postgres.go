@@ -149,9 +149,17 @@ func (p *PostgresAPIKeyProvider) Authenticate(r *http.Request) (Principal, error
 	return principal, nil
 }
 
+// Actor identifies the admin principal that made a key change, recorded in the
+// audit trail. A zero Actor (e.g. system bootstrap) is fine; use "bootstrap".
+type Actor struct {
+	Subject string
+	Tenant  string
+}
+
 // CreateKey inserts a new API key (storing only its hash) and refreshes the
-// snapshot so it is immediately usable. admin grants /admin/* privileges.
-func (p *PostgresAPIKeyProvider) CreateKey(ctx context.Context, rawKey, tenant, subject string, admin bool) error {
+// snapshot so it is immediately usable. admin grants /admin/* privileges. by
+// records who made the change in the audit trail.
+func (p *PostgresAPIKeyProvider) CreateKey(ctx context.Context, rawKey, tenant, subject string, admin bool, by Actor) error {
 	if rawKey == "" || tenant == "" {
 		return fmt.Errorf("auth: key and tenant are required")
 	}
@@ -163,17 +171,88 @@ func (p *PostgresAPIKeyProvider) CreateKey(ctx context.Context, rawKey, tenant, 
 	if err != nil {
 		return fmt.Errorf("auth: create key: %w", err)
 	}
+	p.writeAudit(ctx, "create", hashKey(rawKey), tenant, admin, by)
 	return p.Reload(ctx)
 }
 
-// RevokeKey soft-disables a key by its raw value and refreshes the snapshot.
-func (p *PostgresAPIKeyProvider) RevokeKey(ctx context.Context, rawKey string) error {
+// RevokeKey soft-disables a key by its raw value and refreshes the snapshot. by
+// records who made the change in the audit trail.
+func (p *PostgresAPIKeyProvider) RevokeKey(ctx context.Context, rawKey string, by Actor) error {
 	if _, err := p.pool.Exec(ctx,
 		`UPDATE api_keys SET enabled = FALSE WHERE key_hash = $1`, hashKey(rawKey)); err != nil {
 		return fmt.Errorf("auth: revoke key: %w", err)
 	}
+	p.writeAudit(ctx, "revoke", hashKey(rawKey), "", false, by)
 	return p.Reload(ctx)
 }
+
+// writeAudit records a key change. Only the hash is stored (never plaintext).
+// A failed audit write does NOT roll back the key change (already committed) —
+// it is logged loudly instead (fail-loud), so a broken audit table is visible
+// without silently blocking key management.
+func (p *PostgresAPIKeyProvider) writeAudit(ctx context.Context, action, keyHash, targetTenant string, targetAdmin bool, by Actor) {
+	_, err := p.pool.Exec(ctx,
+		`INSERT INTO api_key_audit (action, key_hash, target_tenant, target_admin, actor_subject, actor_tenant)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		action, keyHash, targetTenant, targetAdmin, by.Subject, by.Tenant)
+	if err != nil && p.log != nil {
+		p.log.Error("auth: key audit write failed (key change already applied)",
+			zap.String("action", action), zap.Error(err))
+	}
+}
+
+// AuditFilter narrows an audit query. Zero fields mean "no filter"; Limit <= 0
+// falls back to a sane default.
+type AuditFilter struct {
+	KeyHash string
+	Action  string
+	Limit   int
+}
+
+// AuditRow is one recorded key change (hash only, no secret material).
+type AuditRow struct {
+	TS           time.Time `json:"ts"`
+	Action       string    `json:"action"`
+	KeyHash      string    `json:"key_hash"`
+	TargetTenant string    `json:"target_tenant"`
+	TargetAdmin  bool      `json:"target_admin"`
+	ActorSubject string    `json:"actor_subject"`
+	ActorTenant  string    `json:"actor_tenant"`
+}
+
+// ListAudit returns key-change audit rows, most recent first, optionally
+// filtered by key hash and/or action.
+func (p *PostgresAPIKeyProvider) ListAudit(ctx context.Context, f AuditFilter) ([]AuditRow, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := p.pool.Query(ctx,
+		`SELECT ts, action, key_hash, target_tenant, target_admin, actor_subject, actor_tenant
+		 FROM api_key_audit
+		 WHERE ($1 = '' OR key_hash = $1) AND ($2 = '' OR action = $2)
+		 ORDER BY ts DESC LIMIT $3`,
+		f.KeyHash, f.Action, limit)
+	if err != nil {
+		return nil, fmt.Errorf("auth: list audit: %w", err)
+	}
+	defer rows.Close()
+	var out []AuditRow
+	for rows.Next() {
+		var a AuditRow
+		if err := rows.Scan(&a.TS, &a.Action, &a.KeyHash, &a.TargetTenant,
+			&a.TargetAdmin, &a.ActorSubject, &a.ActorTenant); err != nil {
+			return nil, fmt.Errorf("auth: scan audit: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// AuditKeyHash exposes the hash used to correlate a raw key with audit rows,
+// so callers (e.g. the admin endpoint) can filter by a plaintext key without
+// re-deriving the digest.
+func AuditKeyHash(rawKey string) string { return hashKey(rawKey) }
 
 // KeyInfo is one row of the key registry (no secret material).
 type KeyInfo struct {

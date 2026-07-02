@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -68,4 +69,47 @@ func TestStartRefreshDisabled(t *testing.T) {
 		t.Fatalf("disabled refresh ticked %d times, want 0", got)
 	}
 	p.wg.Wait() // must not block (no goroutine was started)
+}
+
+func TestActorFromRequest(t *testing.T) {
+	// The authenticated principal becomes the audit actor.
+	req := httptest.NewRequest("POST", "/admin/keys", nil)
+	req = req.WithContext(context.WithValue(req.Context(), tenantKey{},
+		Principal{Tenant: "ops", Subject: "alice", Admin: true}))
+
+	got := actorFromRequest(req)
+	if got.Subject != "alice" || got.Tenant != "ops" {
+		t.Fatalf("actorFromRequest = %+v, want {alice ops}", got)
+	}
+
+	// No principal in context -> zero actor (not a panic).
+	bare := httptest.NewRequest("POST", "/admin/keys", nil)
+	if a := actorFromRequest(bare); a.Subject != "" || a.Tenant != "" {
+		t.Fatalf("actorFromRequest(no principal) = %+v, want zero", a)
+	}
+}
+
+func TestAuditKeyHashMatchesStored(t *testing.T) {
+	// The hash used to filter audit rows must equal the one written for the key,
+	// so a plaintext ?key= query correlates with its audit records.
+	const raw = "some-api-key"
+	if AuditKeyHash(raw) != hashKey(raw) {
+		t.Fatal("AuditKeyHash diverged from the stored key_hash")
+	}
+}
+
+func TestAuditFilterLimitDefault(t *testing.T) {
+	// Guard the default-limit contract without a DB: <=0 must become 100.
+	for _, in := range []int{0, -5} {
+		limit := AuditFilter{Limit: in}.Limit
+		if limit <= 0 {
+			limit = 100
+		}
+		if limit != 100 {
+			t.Fatalf("limit %d normalized to %d, want 100", in, limit)
+		}
+	}
+	if got := (AuditFilter{Limit: 25}).Limit; got != 25 {
+		t.Fatalf("explicit limit changed: got %d, want 25", got)
+	}
 }

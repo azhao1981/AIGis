@@ -96,7 +96,7 @@ var serveCmd = &cobra.Command{
 			// so it is safe on every restart.
 			admins := adminKeys()
 			for rawKey, tenant := range apiKeys() {
-				if err := keyProvider.CreateKey(cmd.Context(), rawKey, tenant, tenant, admins[rawKey]); err != nil {
+				if err := keyProvider.CreateKey(cmd.Context(), rawKey, tenant, tenant, admins[rawKey], auth.Actor{Subject: "bootstrap"}); err != nil {
 					return fmt.Errorf("failed to seed API key: %w", err)
 				}
 			}
