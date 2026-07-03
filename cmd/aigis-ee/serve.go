@@ -18,6 +18,7 @@ import (
 	"aigis/ee/billing"
 	eequota "aigis/ee/quota"
 	"aigis/internal/config"
+	corequota "aigis/internal/core/quota"
 	"aigis/internal/pkg/logger"
 	"aigis/internal/server"
 )
@@ -175,25 +176,60 @@ var serveCmd = &cobra.Command{
 		}
 
 		// --- Enterprise layer: per-tenant quota / rate limiting ---
-		// Enforce a per-tenant in-flight ceiling when configured (0 = unlimited).
-		// With ee.quota.redis_addr set, the ceiling is shared across all replicas
-		// (distributed); otherwise it is per-process (in-memory).
-		perTenant, defLimit := quotaConfig()
-		if defLimit > 0 || len(perTenant) > 0 {
-			if addr := viper.GetString("ee.quota.redis_addr"); addr != "" {
-				rl, err := eequota.NewRedisLimiter(cmd.Context(), addr,
-					viper.GetString("ee.quota.redis_password"), viper.GetInt("ee.quota.redis_db"),
-					perTenant, defLimit, globalLogger)
-				if err != nil {
-					return fmt.Errorf("failed to init distributed quota: %w", err)
+		// Two independent per-tenant dimensions, either or both may be enabled:
+		//   - concurrency: max in-flight requests (ee.quota.default / per_tenant)
+		//   - QPS: max requests per one-second window (ee.quota.qps_default /
+		//     qps_per_tenant)
+		// With ee.quota.redis_addr set each enabled gate is shared across all
+		// replicas (distributed); otherwise it is per-process (in-memory). The two
+		// gates are composed into a single TenantLimiter injected via the seam.
+		ccPerTenant, ccDef := quotaConfig()
+		qpsPerTenant, qpsDef := qpsConfig()
+		ccOn := ccDef > 0 || len(ccPerTenant) > 0
+		qpsOn := qpsDef > 0 || len(qpsPerTenant) > 0
+		if ccOn || qpsOn {
+			redisAddr := viper.GetString("ee.quota.redis_addr")
+			distributed := redisAddr != ""
+
+			var concurrency corequota.Limiter
+			if ccOn {
+				if distributed {
+					rl, err := eequota.NewRedisLimiter(cmd.Context(), redisAddr,
+						viper.GetString("ee.quota.redis_password"), viper.GetInt("ee.quota.redis_db"),
+						ccPerTenant, ccDef, globalLogger)
+					if err != nil {
+						return fmt.Errorf("failed to init distributed concurrency quota: %w", err)
+					}
+					defer rl.Close()
+					concurrency = rl
+				} else {
+					concurrency = eequota.NewConcurrencyLimiter(ccPerTenant, ccDef)
 				}
-				defer rl.Close()
-				srv.SetQuotaLimiter(rl)
-				globalLogger.Sugar().Infof("EE quota enabled (distributed via Redis): default=%d, per-tenant overrides=%d", defLimit, len(perTenant))
-			} else {
-				srv.SetQuotaLimiter(eequota.NewConcurrencyLimiter(perTenant, defLimit))
-				globalLogger.Sugar().Infof("EE quota enabled (in-memory, single-replica): default=%d, per-tenant overrides=%d", defLimit, len(perTenant))
 			}
+
+			var rate eequota.RateGate
+			if qpsOn {
+				if distributed {
+					rl, err := eequota.NewRedisRateLimiter(cmd.Context(), redisAddr,
+						viper.GetString("ee.quota.redis_password"), viper.GetInt("ee.quota.redis_db"),
+						qpsPerTenant, qpsDef, globalLogger)
+					if err != nil {
+						return fmt.Errorf("failed to init distributed QPS quota: %w", err)
+					}
+					defer rl.Close()
+					rate = rl
+				} else {
+					rate = eequota.NewRateLimiter(qpsPerTenant, qpsDef)
+				}
+			}
+
+			srv.SetQuotaLimiter(eequota.NewTenantLimiter(rate, concurrency))
+			mode := "in-memory, single-replica"
+			if distributed {
+				mode = "distributed via Redis"
+			}
+			globalLogger.Sugar().Infof("EE quota enabled (%s): concurrency(default=%d,overrides=%d) qps(default=%d,overrides=%d)",
+				mode, ccDef, len(ccPerTenant), qpsDef, len(qpsPerTenant))
 		}
 
 		return srv.Start()
@@ -316,6 +352,22 @@ func quotaConfig() (perTenant map[string]int, def int) {
 	def = viper.GetInt("ee.quota.default")
 	perTenant = make(map[string]int)
 	for tenant, v := range viper.GetStringMap("ee.quota.per_tenant") {
+		perTenant[tenant] = cast(v)
+	}
+	return perTenant, def
+}
+
+// qpsConfig reads per-tenant QPS (requests-per-second) limits from config,
+// mirroring quotaConfig for the rate dimension:
+//
+//	ee.quota.qps_default            -> fallback max requests/sec per tenant (0 = unlimited)
+//	ee.quota.qps_per_tenant.<name>  -> explicit override for one tenant
+//
+// It returns the per-tenant override map and the default ceiling.
+func qpsConfig() (perTenant map[string]int, def int) {
+	def = viper.GetInt("ee.quota.qps_default")
+	perTenant = make(map[string]int)
+	for tenant, v := range viper.GetStringMap("ee.quota.qps_per_tenant") {
 		perTenant[tenant] = cast(v)
 	}
 	return perTenant, def
