@@ -50,6 +50,14 @@
 - **接线**：`serve.go` `platformTenant()`（读 `ee.auth.platform_tenant`，默认 `ops`）串入 `auth.AdminMiddleware` + `billing.AdminMiddleware`；核心不感知（CORE_CLEAN）
 - **真机 e2e（PG+Redis，10/10）**：平台 admin 见 acme+globex 且 `?tenant=` 过滤生效 → 租户 admin `?tenant=globex` 不泄漏、只见本租户 → 越权 create 被改写进本租户（globex→acme）→ 跨租户 revoke 403、本租户 revoke 204 → 审计无跨租户泄漏 → usage 200
 
+### SaaS — 自助注册（batch C1）
+- **`POST /register` 自助注册**：`ee/auth` `UserStore.RegisterUser(ctx, email, password, tenant)`——复用 users 表（零新迁移），bcrypt 哈希，`INSERT ... ON CONFLICT DO NOTHING`（**非 upsert**，绝不覆盖已有账号密码/租户/权限）；email 已存在返 `ErrEmailTaken`；`is_admin` **硬编码 false**（自助注册永远是普通成员，admin 只来自 bootstrap 或平台 admin）
+- **开关默认关**：`ee.auth.allow_register`（默认 `false`，防垃圾注册）；关闭态 `/register` 直接 **404**（不暴露端点存在），`SessionMiddleware` 加 `allowRegister bool` 参数门控；`serve.go` `allowRegister()` 接线
+- **handleRegister**：只接受 POST；缺字段 400、成功 **201**（返 `{tenant,subject}`，**不自动登录**，引导去 /login，KISS）、email 冲突 **409**（注册须暴露此唯一情形，与 login 的统一模糊错误不同，好让用户知道去登录）
+- **测试**：`register_test`（扩展内存 fake `userAPI` 加 `RegisterUser`，4 例：关闭 404/缺字段 400/成功 201 且强制非 admin/冲突 409）DB-free 全过；CORE_CLEAN（不引新依赖）
+- **真机 e2e（PG+Redis，8/8）**：关闭态 /register 404 → 开启缺字段 400 → 注册 201 → 重复 409 → 注册用户能 /login 200 发 cookie → 该用户普通成员访问 /admin/keys 403 → /me 显示 `admin:false`
+- **不做（留 C2）**：邮箱验证/激活、密码重置、owner/member 角色细分、自动开租户——均强依赖 SMTP 发信基建，属另一批
+
 ---
 
 ## 待办（TODO / 观察项，按需）
@@ -57,7 +65,7 @@
 - [ ] **用量不丢的强保证（WAL）**：当前突发过载/DB 长挂仍会丢弃（有计数、不静默）；若计费要求「一条不丢」，需落盘缓冲（WAL / 磁盘队列）重放——重量级，按需再上
 - [ ] **配额维度扩展**：现仅并发数，可加 QPS / token 配额（token 配额需读用量库）
 - [ ] **API key 近实时失效（pub/sub）**：现为轮询刷新（默认 30s 收敛，有界延迟）；若吊销需秒级跨副本生效，可加 Redis pub/sub 广播失效事件（各副本收到即 Reload）——引入 auth→redis 依赖 + 断连重订阅，按需再上
-- [ ] **SaaS batch C — 自助注册 + 邮箱验证 + 角色细分**：开放 `POST /register` + 邮件验证码激活、租户内 owner/member 角色、密码重置流程——按需再上
+- [ ] **SaaS batch C2 — 邮箱验证 + 角色细分 + 密码重置**：自助注册（C1）已上；剩邮件验证码激活、租户内 owner/member 角色、密码重置流程——均强依赖 SMTP 发信基建，按需再上
 
 ## 相关 OSS 待澄清项（见 TODO.md B 段，按需）
 - Azure OpenAI legacy（`?api-version=` + `api-key` 头）
@@ -76,6 +84,7 @@ ee:
       - "key-xxx"
     reload_interval_sec: 30  # 多副本下后台刷新 key 快照间隔秒（默认 30，≤0=禁用/单副本）
     platform_tenant: "ops"   # 平台 admin 所属租户名（默认 ops）：该租户 admin 全租户可见/可管；其余租户 admin 只限本租户
+    allow_register: false    # 自助注册开关（默认 false）：true 才暴露 POST /register，注册用户强制普通成员(非 admin)
     session:               # 设置 redis_addr 后启用 SaaS 用户登录（/login /logout /me）
       redis_addr: ""       # 会话存储 Redis；留空则复用 ee.quota.redis_addr；都空=纯 API key
       redis_password: ""

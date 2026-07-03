@@ -27,9 +27,11 @@ type sessionAPI interface {
 	Delete(ctx context.Context, id string)
 }
 
-// userAPI abstracts credential verification for testing. *UserStore satisfies it.
+// userAPI abstracts credential verification and self-service signup for testing.
+// *UserStore satisfies it.
 type userAPI interface {
 	VerifyPassword(ctx context.Context, email, password string) (Principal, error)
+	RegisterUser(ctx context.Context, email, password, tenant string) error
 }
 
 // SessionMiddleware authenticates dashboard (human) and gateway (machine) callers
@@ -38,13 +40,16 @@ type userAPI interface {
 //   - POST /login       email+password -> creates a session, sets the cookie
 //   - POST /logout      invalidates the session and clears the cookie
 //   - GET  /me          returns the current principal (who am I)
+//   - POST /register    self-service signup (only when allowRegister is true)
 //   - everything else   authenticated by session cookie first, then Bearer API
 //     key (so programmatic clients keep working unchanged)
 //
 // It supersedes Middleware when a UserStore + SessionStore are configured, and
 // like every EE seam it plugs in purely as a server.Middleware (the core never
-// imports this package).
-func SessionMiddleware(users userAPI, sessions sessionAPI, keys AuthProvider, log *zap.Logger) server.Middleware {
+// imports this package). allowRegister gates the self-service /register route:
+// when false, the path 404s so a locked-down deployment doesn't even advertise
+// that signup exists.
+func SessionMiddleware(users userAPI, sessions sessionAPI, keys AuthProvider, allowRegister bool, log *zap.Logger) server.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -56,6 +61,13 @@ func SessionMiddleware(users userAPI, sessions sessionAPI, keys AuthProvider, lo
 				return
 			case "/me":
 				handleMe(w, r, sessions)
+				return
+			case "/register":
+				if !allowRegister {
+					http.NotFound(w, r)
+					return
+				}
+				handleRegister(w, r, users, log)
 				return
 			}
 
@@ -134,6 +146,48 @@ func handleLogin(w http.ResponseWriter, r *http.Request, users userAPI, sessions
 	setSessionCookie(w, id)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tenant": principal.Tenant, "subject": principal.Subject, "admin": principal.Admin,
+	})
+}
+
+type registerRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Tenant   string `json:"tenant"`
+}
+
+// handleRegister is the self-service signup handler (POST /register), reachable
+// only when the deployment enables it. It creates an ordinary (non-admin) user
+// and does NOT log them in — on success it returns 201 and the client is
+// expected to POST /login next. An already-taken email yields 409 (the one case
+// registration must reveal, unlike login, so the user knows to sign in instead).
+func handleRegister(w http.ResponseWriter, r *http.Request, users userAPI, log *zap.Logger) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req registerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if req.Email == "" || req.Password == "" || req.Tenant == "" {
+		writeJSONError(w, http.StatusBadRequest, "email, password and tenant are required")
+		return
+	}
+	err := users.RegisterUser(r.Context(), req.Email, req.Password, req.Tenant)
+	if err == ErrEmailTaken {
+		writeJSONError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err != nil {
+		if log != nil {
+			log.Warn("register: create user failed", zap.Error(err))
+		}
+		writeJSONError(w, http.StatusInternalServerError, "registration failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"tenant": req.Tenant, "subject": normalizeEmail(req.Email),
 	})
 }
 

@@ -133,8 +133,13 @@ var serveCmd = &cobra.Command{
 						return fmt.Errorf("failed to seed user %q: %w", email, err)
 					}
 				}
-				srv.Use(auth.SessionMiddleware(userStore, sessionStore, keyProvider, globalLogger))
-				globalLogger.Sugar().Info("EE auth: dashboard login enabled (session via Redis); /login /logout /me active")
+				reg := allowRegister()
+				srv.Use(auth.SessionMiddleware(userStore, sessionStore, keyProvider, reg, globalLogger))
+				if reg {
+					globalLogger.Sugar().Info("EE auth: dashboard login enabled (session via Redis); /login /logout /me /register active")
+				} else {
+					globalLogger.Sugar().Info("EE auth: dashboard login enabled (session via Redis); /login /logout /me active (self-register off)")
+				}
 			} else {
 				srv.Use(auth.Middleware(keyProvider))
 			}
@@ -259,6 +264,13 @@ func platformTenant() string {
 		return v
 	}
 	return "ops"
+}
+
+// allowRegister reports whether the self-service signup route (POST /register)
+// is exposed. Reads ee.auth.allow_register; defaults to false so a deployment
+// must opt in — an open registration endpoint invites spam accounts.
+func allowRegister() bool {
+	return viper.GetBool("ee.auth.allow_register")
 }
 
 // seedUsers reads the ee.auth.users bootstrap list: each entry declares a

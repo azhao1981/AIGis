@@ -44,14 +44,34 @@ func (f *fakeSessions) Delete(_ context.Context, id string) {
 	delete(f.data, id)
 }
 
-// fakeUsers is an in-memory userAPI: one hard-coded valid credential.
-type fakeUsers struct{}
+// fakeUsers is an in-memory userAPI: one hard-coded valid credential, plus a
+// registry that RegisterUser fills so signup tests can assert what was stored.
+type fakeUsers struct {
+	mu         sync.Mutex
+	registered map[string]Principal // email -> what RegisterUser recorded
+}
 
-func (fakeUsers) VerifyPassword(_ context.Context, email, password string) (Principal, error) {
+func newFakeUsers() *fakeUsers { return &fakeUsers{registered: map[string]Principal{}} }
+
+func (*fakeUsers) VerifyPassword(_ context.Context, email, password string) (Principal, error) {
 	if email == "admin@acme.io" && password == "s3cret" {
 		return Principal{Tenant: "acme", Subject: email, Admin: true}, nil
 	}
 	return Principal{}, ErrInvalidCredentials
+}
+
+// RegisterUser mirrors the store contract: reject a taken email, otherwise
+// record the new user. The handler hard-codes admin=false, so we store that to
+// let tests prove self-registered users never get admin.
+func (f *fakeUsers) RegisterUser(_ context.Context, email, _ /*password*/, tenant string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	email = normalizeEmail(email)
+	if _, ok := f.registered[email]; ok {
+		return ErrEmailTaken
+	}
+	f.registered[email] = Principal{Tenant: tenant, Subject: email, Admin: false}
+	return nil
 }
 
 // okNext is a downstream handler that records whether it ran and echoes the
@@ -72,7 +92,7 @@ func (denyKeys) Authenticate(*http.Request) (Principal, error) { return Principa
 
 func TestLoginSetsCookieAndSessionWorks(t *testing.T) {
 	sessions := newFakeSessions()
-	h := SessionMiddleware(fakeUsers{}, sessions, denyKeys{}, nil)(okNext())
+	h := SessionMiddleware(newFakeUsers(), sessions, denyKeys{}, false, nil)(okNext())
 
 	// 1. login with good credentials -> 200 + Set-Cookie
 	body := strings.NewReader(`{"email":"admin@acme.io","password":"s3cret"}`)
@@ -108,7 +128,7 @@ func TestLoginSetsCookieAndSessionWorks(t *testing.T) {
 }
 
 func TestLoginWrongPassword401(t *testing.T) {
-	h := SessionMiddleware(fakeUsers{}, newFakeSessions(), denyKeys{}, nil)(okNext())
+	h := SessionMiddleware(newFakeUsers(), newFakeSessions(), denyKeys{}, false, nil)(okNext())
 	body := strings.NewReader(`{"email":"admin@acme.io","password":"wrong"}`)
 	req := httptest.NewRequest(http.MethodPost, "/login", body)
 	rec := httptest.NewRecorder()
@@ -119,7 +139,7 @@ func TestLoginWrongPassword401(t *testing.T) {
 }
 
 func TestNoCredentialsRejected(t *testing.T) {
-	h := SessionMiddleware(fakeUsers{}, newFakeSessions(), denyKeys{}, nil)(okNext())
+	h := SessionMiddleware(newFakeUsers(), newFakeSessions(), denyKeys{}, false, nil)(okNext())
 	req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -130,7 +150,7 @@ func TestNoCredentialsRejected(t *testing.T) {
 
 func TestLogoutInvalidatesSession(t *testing.T) {
 	sessions := newFakeSessions()
-	h := SessionMiddleware(fakeUsers{}, sessions, denyKeys{}, nil)(okNext())
+	h := SessionMiddleware(newFakeUsers(), sessions, denyKeys{}, false, nil)(okNext())
 
 	id, _ := sessions.New(context.Background(), Principal{Tenant: "acme", Subject: "admin@acme.io"})
 	cookie := &http.Cookie{Name: sessionCookie, Value: id}
@@ -156,7 +176,7 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 
 func TestMeReturnsPrincipal(t *testing.T) {
 	sessions := newFakeSessions()
-	h := SessionMiddleware(fakeUsers{}, sessions, denyKeys{}, nil)(okNext())
+	h := SessionMiddleware(newFakeUsers(), sessions, denyKeys{}, false, nil)(okNext())
 	id, _ := sessions.New(context.Background(), Principal{Tenant: "acme", Subject: "admin@acme.io", Admin: true})
 
 	req := httptest.NewRequest(http.MethodGet, "/me", nil)
@@ -176,7 +196,7 @@ func TestMeReturnsPrincipal(t *testing.T) {
 }
 
 func TestMeUnauthenticated401(t *testing.T) {
-	h := SessionMiddleware(fakeUsers{}, newFakeSessions(), denyKeys{}, nil)(okNext())
+	h := SessionMiddleware(newFakeUsers(), newFakeSessions(), denyKeys{}, false, nil)(okNext())
 	req := httptest.NewRequest(http.MethodGet, "/me", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -189,7 +209,7 @@ func TestBearerFallbackWhenNoSession(t *testing.T) {
 	// A provider that accepts a specific token, to prove the Bearer fallback
 	// still works when there is no session cookie.
 	keys := NewStaticAPIKeyProvider(map[string]string{"tok-123": "acme"})
-	h := SessionMiddleware(fakeUsers{}, newFakeSessions(), keys, nil)(okNext())
+	h := SessionMiddleware(newFakeUsers(), newFakeSessions(), keys, false, nil)(okNext())
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
 	req.Header.Set("Authorization", "Bearer tok-123")

@@ -22,6 +22,11 @@ import (
 // wrong) so it can't be used to probe which emails exist.
 var ErrInvalidCredentials = errors.New("invalid email or password")
 
+// ErrEmailTaken is returned by RegisterUser when the email already belongs to a
+// user. Unlike CreateUser's idempotent upsert, self-service registration must
+// refuse to touch an existing account (no password/tenant/privilege overwrite).
+var ErrEmailTaken = errors.New("email already registered")
+
 // UserStore manages human dashboard logins in PostgreSQL: SaaS operators who log
 // into the admin UI, as opposed to the machine-facing API keys. Passwords are
 // stored only as bcrypt hashes (plaintext never touches the DB). A user belongs
@@ -77,6 +82,34 @@ func (s *UserStore) CreateUser(ctx context.Context, email, password, tenant stri
 		email, string(hash), tenant, admin)
 	if err != nil {
 		return fmt.Errorf("users: create user: %w", err)
+	}
+	return nil
+}
+
+// RegisterUser is the self-service signup path (POST /register). Unlike
+// CreateUser it never overwrites an existing account: an INSERT ... ON CONFLICT
+// DO NOTHING returns ErrEmailTaken instead, so a stranger cannot hijack another
+// user's password/tenant/privileges by re-registering their email. is_admin is
+// hard-coded FALSE — self-registered users are always ordinary members; admin
+// grants come only from bootstrap config or a platform admin.
+func (s *UserStore) RegisterUser(ctx context.Context, email, password, tenant string) error {
+	email = normalizeEmail(email)
+	if email == "" || password == "" || tenant == "" {
+		return fmt.Errorf("users: email, password and tenant are required")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("users: hash password: %w", err)
+	}
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO users (email, password_hash, tenant, is_admin) VALUES ($1, $2, $3, FALSE)
+		 ON CONFLICT (email) DO NOTHING`,
+		email, string(hash), tenant)
+	if err != nil {
+		return fmt.Errorf("users: register user: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrEmailTaken
 	}
 	return nil
 }
