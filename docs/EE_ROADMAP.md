@@ -42,6 +42,14 @@
 - **测试**：`session_middleware`（接口 seam `sessionAPI`/`userAPI` + 内存 fake，7 例：登录发 cookie/错密码 401/无凭证 401/登出失效/`/me`/Bearer 退回）、`users`（`normalizeEmail`、bcrypt 往返）无库单测全过；CORE_CLEAN（bcrypt/pgx/redis 不漏进核心）
 - **真机 e2e（PG+Redis，11/11）**：无凭证 /admin/keys 401 → 错密码 login 401 → 正确 login 200 发 cookie → 带 cookie /me 出 subject → 带 cookie /admin/keys 200 → Bearer key /admin/keys 仍 200 → /logout 204 → 同 cookie 再访问 401
 
+### SaaS — 租户数据隔离（batch A 之上，batch B）
+- **两级 admin**：`ee/auth` `EffectiveTenant(ctx, platformTenant) (scope, isPlatform)`——principal.tenant == `ee.auth.platform_tenant`（默认 `ops`）为**平台 admin**（`scope=""` 不过滤、全租户可见），其余为**租户 admin**（`scope=本租户`，无视用户传入 `?tenant=`，只见/只动本租户）；平台租户名可配（一个纯函数扛全部隔离判定，DB-free 单测覆盖）
+- **keys 隔离**：`/admin/keys` list 按 `EffectiveTenant` 覆写查询 tenant（租户 admin 忽略 `?tenant=`）；create **强制改写** `req.Tenant` 为本租户（租户 admin 越权建 globex key 落到自己 acme，非 403，无声纠偏）；revoke 先 `KeyTenant(rawKey)` 查 key 归属，跨租户吊销返 **403**
+- **audit 隔离**：`AuditFilter.TargetTenant` + `ListAudit` SQL 加 `($N='' OR target_tenant=$N)`；`RevokeKey` 改用 `UPDATE ... RETURNING tenant` 捕获被吊销 key 的租户写入审计行——**零新迁移**（审计隔离是 SQL 条件 + RETURNING，不加列）；租户 admin 看审计只见本租户行
+- **usage 隔离**：`ee/billing` `handleUsage` 同走 `auth.EffectiveTenant` 收敛 `UsageQuery.Tenant`
+- **接线**：`serve.go` `platformTenant()`（读 `ee.auth.platform_tenant`，默认 `ops`）串入 `auth.AdminMiddleware` + `billing.AdminMiddleware`；核心不感知（CORE_CLEAN）
+- **真机 e2e（PG+Redis，10/10）**：平台 admin 见 acme+globex 且 `?tenant=` 过滤生效 → 租户 admin `?tenant=globex` 不泄漏、只见本租户 → 越权 create 被改写进本租户（globex→acme）→ 跨租户 revoke 403、本租户 revoke 204 → 审计无跨租户泄漏 → usage 200
+
 ---
 
 ## 待办（TODO / 观察项，按需）
@@ -49,7 +57,6 @@
 - [ ] **用量不丢的强保证（WAL）**：当前突发过载/DB 长挂仍会丢弃（有计数、不静默）；若计费要求「一条不丢」，需落盘缓冲（WAL / 磁盘队列）重放——重量级，按需再上
 - [ ] **配额维度扩展**：现仅并发数，可加 QPS / token 配额（token 配额需读用量库）
 - [ ] **API key 近实时失效（pub/sub）**：现为轮询刷新（默认 30s 收敛，有界延迟）；若吊销需秒级跨副本生效，可加 Redis pub/sub 广播失效事件（各副本收到即 Reload）——引入 auth→redis 依赖 + 断连重订阅，按需再上
-- [ ] **SaaS batch B — 租户数据隔离**：现登录用户已带 tenant，但 `/admin/*` 仍按 key 的 admin 位放行、不限租户；需按登录 principal 的 tenant 过滤 keys/usage/audit（非 admin 只见本租户），管理员跨租户
 - [ ] **SaaS batch C — 自助注册 + 邮箱验证 + 角色细分**：开放 `POST /register` + 邮件验证码激活、租户内 owner/member 角色、密码重置流程——按需再上
 
 ## 相关 OSS 待澄清项（见 TODO.md B 段，按需）
@@ -68,6 +75,7 @@ ee:
     admin_keys:          # 其中拥有 /admin/* 权限的 key 列表
       - "key-xxx"
     reload_interval_sec: 30  # 多副本下后台刷新 key 快照间隔秒（默认 30，≤0=禁用/单副本）
+    platform_tenant: "ops"   # 平台 admin 所属租户名（默认 ops）：该租户 admin 全租户可见/可管；其余租户 admin 只限本租户
     session:               # 设置 redis_addr 后启用 SaaS 用户登录（/login /logout /me）
       redis_addr: ""       # 会话存储 Redis；留空则复用 ee.quota.redis_addr；都空=纯 API key
       redis_password: ""

@@ -138,7 +138,7 @@ var serveCmd = &cobra.Command{
 			} else {
 				srv.Use(auth.Middleware(keyProvider))
 			}
-			srv.Use(auth.AdminMiddleware(keyProvider, globalLogger))
+			srv.Use(auth.AdminMiddleware(keyProvider, platformTenant(), globalLogger))
 			globalLogger.Sugar().Info("EE auth: API keys from DB; /admin/keys enabled")
 		} else if keys := apiKeys(); len(keys) > 0 {
 			srv.Use(auth.Middleware(auth.NewStaticAPIKeyProvider(keys)))
@@ -159,7 +159,7 @@ var serveCmd = &cobra.Command{
 			srv.SetUsageSink(pgSink)
 			// Read-only usage query API (GET /admin/usage). Registered after auth
 			// so admin calls require a valid API key.
-			srv.Use(billing.AdminMiddleware(pgSink, globalLogger))
+			srv.Use(billing.AdminMiddleware(pgSink, platformTenant(), globalLogger))
 			// Light up the keys/usage/audit tabs in the embedded admin dashboard;
 			// the panels are backed by the /admin/* endpoints registered above.
 			srv.Use(eeadminui.CapabilitiesMiddleware())
@@ -249,6 +249,16 @@ func sessionRedis() (addr, password string, db int) {
 // default (24h).
 func sessionTTL() time.Duration {
 	return time.Duration(viper.GetInt("ee.auth.session.ttl_hours")) * time.Hour
+}
+
+// platformTenant returns the tenant whose admins are platform-wide (cross-tenant
+// visibility on /admin/*). Any other tenant's admins are confined to their own
+// tenant. Reads ee.auth.platform_tenant; defaults to "ops".
+func platformTenant() string {
+	if v := viper.GetString("ee.auth.platform_tenant"); v != "" {
+		return v
+	}
+	return "ops"
 }
 
 // seedUsers reads the ee.auth.users bootstrap list: each entry declares a

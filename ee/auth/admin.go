@@ -24,7 +24,12 @@ import (
 //	POST   /admin/keys  {key,tenant,subject}    create/enable a key
 //	DELETE /admin/keys  {key}                   revoke (soft-disable) a key
 //	GET    /admin/keys/audit ?key=&action=&limit=&offset=  key-change audit trail
-func AdminMiddleware(p *PostgresAPIKeyProvider, log *zap.Logger) server.Middleware {
+//
+// platformTenant names the tenant whose admins see every tenant. Admins of any
+// other tenant are confined to their own tenant's keys and audit rows (batch B
+// multi-tenant isolation): a tenant admin's ?tenant= filter is ignored, created
+// keys are forced into their tenant, and cross-tenant revokes are refused.
+func AdminMiddleware(p *PostgresAPIKeyProvider, platformTenant string, log *zap.Logger) server.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -37,7 +42,7 @@ func AdminMiddleware(p *PostgresAPIKeyProvider, log *zap.Logger) server.Middlewa
 					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 					return
 				}
-				listAudit(w, r, p, log)
+				listAudit(w, r, p, platformTenant, log)
 			case "/admin/keys":
 				if !IsAdmin(r.Context()) {
 					http.Error(w, "admin privileges required", http.StatusForbidden)
@@ -45,11 +50,11 @@ func AdminMiddleware(p *PostgresAPIKeyProvider, log *zap.Logger) server.Middlewa
 				}
 				switch r.Method {
 				case http.MethodGet:
-					listKeys(w, r, p, log)
+					listKeys(w, r, p, platformTenant, log)
 				case http.MethodPost:
-					createKey(w, r, p, log)
+					createKey(w, r, p, platformTenant, log)
 				case http.MethodDelete:
-					revokeKey(w, r, p, log)
+					revokeKey(w, r, p, platformTenant, log)
 				default:
 					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 				}
@@ -74,10 +79,16 @@ type keyRequest struct {
 	Admin   bool   `json:"admin"`
 }
 
-func listKeys(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, log *zap.Logger) {
+func listKeys(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, platformTenant string, log *zap.Logger) {
 	q := r.URL.Query()
+	// A tenant admin is pinned to their own tenant; a platform admin (scope "")
+	// may filter by ?tenant= across tenants.
+	tenant := q.Get("tenant")
+	if scope, isPlatform := EffectiveTenant(r.Context(), platformTenant); !isPlatform {
+		tenant = scope
+	}
 	keys, err := p.ListKeys(r.Context(), KeyQuery{
-		Tenant: q.Get("tenant"),
+		Tenant: tenant,
 		Limit:  queryInt(q.Get("limit")),
 		Offset: queryInt(q.Get("offset")),
 	})
@@ -92,11 +103,17 @@ func listKeys(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider,
 	_ = json.NewEncoder(w).Encode(map[string]any{"keys": keys})
 }
 
-func createKey(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, log *zap.Logger) {
+func createKey(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, platformTenant string, log *zap.Logger) {
 	var req keyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
+	}
+	// A tenant admin can only mint keys for their own tenant: force req.Tenant to
+	// their scope regardless of what was posted. A platform admin keeps the
+	// requested tenant so they can provision any tenant.
+	if scope, isPlatform := EffectiveTenant(r.Context(), platformTenant); !isPlatform {
+		req.Tenant = scope
 	}
 	if err := p.CreateKey(r.Context(), req.Key, req.Tenant, req.Subject, req.Admin, actorFromRequest(r)); err != nil {
 		writeErr(w, log, http.StatusBadRequest, err)
@@ -107,11 +124,20 @@ func createKey(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider
 	_ = json.NewEncoder(w).Encode(map[string]any{"tenant": req.Tenant, "subject": req.Subject, "admin": req.Admin})
 }
 
-func revokeKey(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, log *zap.Logger) {
+func revokeKey(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, platformTenant string, log *zap.Logger) {
 	var req keyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
 		http.Error(w, "invalid JSON body (need {\"key\":...})", http.StatusBadRequest)
 		return
+	}
+	// A tenant admin may only revoke keys within their own tenant. Look up the
+	// key's tenant and refuse a cross-tenant revoke (also refuses unknown keys,
+	// which don't belong to the caller's tenant).
+	if scope, isPlatform := EffectiveTenant(r.Context(), platformTenant); !isPlatform {
+		if kt, ok := p.KeyTenant(r.Context(), req.Key); !ok || kt != scope {
+			http.Error(w, "key not found in your tenant", http.StatusForbidden)
+			return
+		}
 	}
 	if err := p.RevokeKey(r.Context(), req.Key, actorFromRequest(r)); err != nil {
 		writeErr(w, log, http.StatusBadRequest, err)
@@ -133,7 +159,7 @@ func queryInt(v string) int {
 // listAudit returns key-change audit rows. Optional filters: ?key= (plaintext,
 // hashed before matching so raw keys never appear in logs/URLs on the DB side),
 // ?action=create|revoke, ?limit=, ?offset=.
-func listAudit(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, log *zap.Logger) {
+func listAudit(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider, platformTenant string, log *zap.Logger) {
 	q := r.URL.Query()
 	f := AuditFilter{
 		Action: q.Get("action"),
@@ -142,6 +168,10 @@ func listAudit(w http.ResponseWriter, r *http.Request, p *PostgresAPIKeyProvider
 	}
 	if raw := q.Get("key"); raw != "" {
 		f.KeyHash = AuditKeyHash(raw)
+	}
+	// A tenant admin only sees audit rows for their own tenant's keys.
+	if scope, isPlatform := EffectiveTenant(r.Context(), platformTenant); !isPlatform {
+		f.TargetTenant = scope
 	}
 	rows, err := p.ListAudit(r.Context(), f)
 	if err != nil {

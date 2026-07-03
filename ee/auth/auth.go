@@ -50,6 +50,24 @@ func IsAdmin(ctx context.Context) bool {
 	return ok && p.Admin
 }
 
+// EffectiveTenant computes the tenant scope an admin request is confined to, for
+// multi-tenant data isolation on the /admin/* endpoints. An admin belonging to
+// the platformTenant is a platform administrator and sees every tenant, so scope
+// is "" (no filter) and isPlatform is true. Any other admin is a tenant
+// administrator, pinned to their own tenant regardless of what they ask for in
+// the query string. A request with no principal yields ("", false) — the caller
+// still guards with IsAdmin, so this is only reached for admins.
+func EffectiveTenant(ctx context.Context, platformTenant string) (scope string, isPlatform bool) {
+	p, ok := FromContext(ctx)
+	if !ok {
+		return "", false
+	}
+	if p.Tenant == platformTenant {
+		return "", true
+	}
+	return p.Tenant, false
+}
+
 // bearerToken extracts the token from an "Authorization: Bearer <token>" header,
 // or returns "" if absent/malformed.
 func bearerToken(r *http.Request) string {

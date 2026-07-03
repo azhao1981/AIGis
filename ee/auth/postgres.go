@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 )
@@ -176,14 +177,35 @@ func (p *PostgresAPIKeyProvider) CreateKey(ctx context.Context, rawKey, tenant, 
 }
 
 // RevokeKey soft-disables a key by its raw value and refreshes the snapshot. by
-// records who made the change in the audit trail.
+// records who made the change in the audit trail. The revoked key's tenant is
+// captured in the same statement so the audit row (and tenant-scoped queries)
+// know which tenant was affected.
 func (p *PostgresAPIKeyProvider) RevokeKey(ctx context.Context, rawKey string, by Actor) error {
-	if _, err := p.pool.Exec(ctx,
-		`UPDATE api_keys SET enabled = FALSE WHERE key_hash = $1`, hashKey(rawKey)); err != nil {
+	var tenant string
+	err := p.pool.QueryRow(ctx,
+		`UPDATE api_keys SET enabled = FALSE WHERE key_hash = $1 RETURNING tenant`,
+		hashKey(rawKey)).Scan(&tenant)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return fmt.Errorf("auth: revoke key: key not found")
+		}
 		return fmt.Errorf("auth: revoke key: %w", err)
 	}
-	p.writeAudit(ctx, "revoke", hashKey(rawKey), "", false, by)
+	p.writeAudit(ctx, "revoke", hashKey(rawKey), tenant, false, by)
 	return p.Reload(ctx)
+}
+
+// KeyTenant returns the tenant a raw key belongs to, or ("", false) if the key is
+// unknown. It lets the admin layer enforce that a tenant administrator only acts
+// on keys within their own tenant before calling RevokeKey.
+func (p *PostgresAPIKeyProvider) KeyTenant(ctx context.Context, rawKey string) (string, bool) {
+	var tenant string
+	err := p.pool.QueryRow(ctx,
+		`SELECT tenant FROM api_keys WHERE key_hash = $1`, hashKey(rawKey)).Scan(&tenant)
+	if err != nil {
+		return "", false
+	}
+	return tenant, true
 }
 
 // writeAudit records a key change. Only the hash is stored (never plaintext).
@@ -202,12 +224,14 @@ func (p *PostgresAPIKeyProvider) writeAudit(ctx context.Context, action, keyHash
 }
 
 // AuditFilter narrows an audit query. Zero fields mean "no filter"; Limit <= 0
-// falls back to a sane default; Offset pages the result.
+// falls back to a sane default; Offset pages the result. TargetTenant scopes the
+// trail to key changes affecting one tenant (used to isolate tenant admins).
 type AuditFilter struct {
-	KeyHash string
-	Action  string
-	Limit   int
-	Offset  int
+	KeyHash      string
+	Action       string
+	TargetTenant string
+	Limit        int
+	Offset       int
 }
 
 // AuditRow is one recorded key change (hash only, no secret material).
@@ -236,8 +260,9 @@ func (p *PostgresAPIKeyProvider) ListAudit(ctx context.Context, f AuditFilter) (
 		`SELECT ts, action, key_hash, target_tenant, target_admin, actor_subject, actor_tenant
 		 FROM api_key_audit
 		 WHERE ($1 = '' OR key_hash = $1) AND ($2 = '' OR action = $2)
-		 ORDER BY ts DESC LIMIT $3 OFFSET $4`,
-		f.KeyHash, f.Action, limit, offset)
+		   AND ($3 = '' OR target_tenant = $3)
+		 ORDER BY ts DESC LIMIT $4 OFFSET $5`,
+		f.KeyHash, f.Action, f.TargetTenant, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("auth: list audit: %w", err)
 	}

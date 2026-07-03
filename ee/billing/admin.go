@@ -28,7 +28,11 @@ import (
 //	  from,to     RFC3339 timestamps; default = last 30 days
 //	  granularity date_trunc unit; default = day
 //	  format      json (default) or csv (downloadable attachment)
-func AdminMiddleware(sink *PostgresSink, log *zap.Logger) server.Middleware {
+//
+// platformTenant names the tenant whose admins see every tenant's usage. Any
+// other admin is a tenant admin and only sees their own tenant's usage — the
+// ?tenant= filter is ignored for them (batch B multi-tenant isolation).
+func AdminMiddleware(sink *PostgresSink, platformTenant string, log *zap.Logger) server.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/admin/usage" {
@@ -43,15 +47,21 @@ func AdminMiddleware(sink *PostgresSink, log *zap.Logger) server.Middleware {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			handleUsage(w, r, sink, log)
+			handleUsage(w, r, sink, platformTenant, log)
 		})
 	}
 }
 
-func handleUsage(w http.ResponseWriter, r *http.Request, sink *PostgresSink, log *zap.Logger) {
+func handleUsage(w http.ResponseWriter, r *http.Request, sink *PostgresSink, platformTenant string, log *zap.Logger) {
 	q := r.URL.Query()
+	// A tenant admin is confined to their own tenant; a platform admin (scope "")
+	// may filter across tenants via ?tenant=.
+	tenant := q.Get("tenant")
+	if scope, isPlatform := auth.EffectiveTenant(r.Context(), platformTenant); !isPlatform {
+		tenant = scope
+	}
 	uq := UsageQuery{
-		Tenant:      q.Get("tenant"),
+		Tenant:      tenant,
 		Granularity: q.Get("granularity"),
 	}
 	if v := q.Get("from"); v != "" {
