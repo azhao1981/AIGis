@@ -19,6 +19,7 @@ import (
 	eequota "aigis/ee/quota"
 	"aigis/internal/config"
 	corequota "aigis/internal/core/quota"
+	"aigis/internal/core/usage"
 	"aigis/internal/pkg/logger"
 	"aigis/internal/server"
 )
@@ -173,14 +174,17 @@ var serveCmd = &cobra.Command{
 
 		// --- Enterprise layer: usage metering / billing ---
 		// Persist usage to PostgreSQL/TimescaleDB when a DSN is configured;
-		// otherwise fall back to the in-memory sink (aggregate + log only).
+		// otherwise fall back to the in-memory sink (aggregate + log only). The
+		// chosen base sink is installed below, after the quota block, so the token
+		// gate can wrap it (TokenMeteringSink) when token quota is enabled.
+		var usageSink usage.Sink
 		if dsn != "" {
 			pgSink, err := billing.NewPostgresSinkWithOptions(cmd.Context(), dsn, globalLogger, billingOptions())
 			if err != nil {
 				return fmt.Errorf("failed to init billing store: %w", err)
 			}
 			defer pgSink.Close()
-			srv.SetUsageSink(pgSink)
+			usageSink = pgSink
 			// Read-only usage query API (GET /admin/usage). Registered after auth
 			// so admin calls require a valid API key.
 			srv.Use(billing.AdminMiddleware(pgSink, platformTenant(), globalLogger))
@@ -189,23 +193,29 @@ var serveCmd = &cobra.Command{
 			srv.Use(eeadminui.CapabilitiesMiddleware())
 			globalLogger.Sugar().Info("EE billing: usage persisted to PostgreSQL; /admin/usage enabled")
 		} else {
-			srv.SetUsageSink(billing.NewMeteringSink(globalLogger))
+			usageSink = billing.NewMeteringSink(globalLogger)
 			globalLogger.Sugar().Warn("EE billing: ee.billing.dsn not set — usage kept in memory only")
 		}
 
 		// --- Enterprise layer: per-tenant quota / rate limiting ---
-		// Two independent per-tenant dimensions, either or both may be enabled:
+		// Three independent per-tenant dimensions, any subset may be enabled:
 		//   - concurrency: max in-flight requests (ee.quota.default / per_tenant)
 		//   - QPS: max requests per one-second window (ee.quota.qps_default /
 		//     qps_per_tenant)
+		//   - tokens: max tokens per period (ee.quota.token_default /
+		//     token_per_tenant / token_period)
 		// With ee.quota.redis_addr set each enabled gate is shared across all
-		// replicas (distributed); otherwise it is per-process (in-memory). The two
+		// replicas (distributed); otherwise it is per-process (in-memory). The
 		// gates are composed into a single TenantLimiter injected via the seam.
 		ccPerTenant, ccDef := quotaConfig()
 		qpsPerTenant, qpsDef := qpsConfig()
+		tokPerTenant, tokDef, tokPeriod := tokenConfig()
 		ccOn := ccDef > 0 || len(ccPerTenant) > 0
 		qpsOn := qpsDef > 0 || len(qpsPerTenant) > 0
-		if ccOn || qpsOn {
+		tokOn := tokDef > 0 || len(tokPerTenant) > 0
+
+		var tokenGate eequota.TokenGate
+		if ccOn || qpsOn || tokOn {
 			redisAddr := viper.GetString("ee.quota.redis_addr")
 			distributed := redisAddr != ""
 
@@ -241,14 +251,37 @@ var serveCmd = &cobra.Command{
 				}
 			}
 
-			srv.SetQuotaLimiter(eequota.NewTenantLimiter(rate, concurrency))
+			if tokOn {
+				if distributed {
+					tl, err := eequota.NewRedisTokenLimiter(cmd.Context(), redisAddr,
+						viper.GetString("ee.quota.redis_password"), viper.GetInt("ee.quota.redis_db"),
+						tokPerTenant, tokDef, tokPeriod, globalLogger)
+					if err != nil {
+						return fmt.Errorf("failed to init distributed token quota: %w", err)
+					}
+					defer tl.Close()
+					tokenGate = tl
+				} else {
+					tokenGate = eequota.NewTokenLimiter(tokPerTenant, tokDef, tokPeriod)
+				}
+			}
+
+			srv.SetQuotaLimiter(eequota.NewTenantLimiter(rate, tokenGate, concurrency))
 			mode := "in-memory, single-replica"
 			if distributed {
 				mode = "distributed via Redis"
 			}
-			globalLogger.Sugar().Infof("EE quota enabled (%s): concurrency(default=%d,overrides=%d) qps(default=%d,overrides=%d)",
-				mode, ccDef, len(ccPerTenant), qpsDef, len(qpsPerTenant))
+			globalLogger.Sugar().Infof("EE quota enabled (%s): concurrency(default=%d,overrides=%d) qps(default=%d,overrides=%d) tokens(default=%d,overrides=%d,period=%s)",
+				mode, ccDef, len(ccPerTenant), qpsDef, len(qpsPerTenant), tokDef, len(tokPerTenant), viper.GetString("ee.quota.token_period"))
 		}
+
+		// Install the usage sink last: when token quota is on, wrap the billing
+		// sink so every completed request books its tokens against the budget the
+		// admission gate reads (write half of the token quota; core stays unchanged).
+		if tokenGate != nil {
+			usageSink = eequota.NewTokenMeteringSink(usageSink, tokenGate)
+		}
+		srv.SetUsageSink(usageSink)
 
 		return srv.Start()
 	},
@@ -396,6 +429,23 @@ func qpsConfig() (perTenant map[string]int, def int) {
 		perTenant[tenant] = cast(v)
 	}
 	return perTenant, def
+}
+
+// tokenConfig reads per-tenant token-budget limits from config, mirroring
+// quotaConfig for the cumulative-token dimension:
+//
+//	ee.quota.token_default            -> fallback max tokens per period per tenant (0 = unlimited)
+//	ee.quota.token_per_tenant.<name>  -> explicit override for one tenant
+//	ee.quota.token_period             -> reset granularity: day (default) | hour | month
+//
+// It returns the per-tenant override map, the default ceiling, and the period.
+func tokenConfig() (perTenant map[string]int, def int, period eequota.Period) {
+	def = viper.GetInt("ee.quota.token_default")
+	perTenant = make(map[string]int)
+	for tenant, v := range viper.GetStringMap("ee.quota.token_per_tenant") {
+		perTenant[tenant] = cast(v)
+	}
+	return perTenant, def, eequota.ParsePeriod(viper.GetString("ee.quota.token_period"))
 }
 
 // cast coerces a viper config value to an int, tolerating int/float/string.

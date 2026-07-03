@@ -37,10 +37,23 @@ func (f *fakeConcurrency) Acquire(string) (corequota.Release, bool) {
 	return func() { f.releases++ }, true
 }
 
+// fakeToken is a TokenGate with a fixed Allow verdict, counting Allow checks and
+// Add bookings so a test can prove the token gate ran at admission but is not
+// booked during Acquire (tokens are booked by the sink after the response).
+type fakeToken struct {
+	allow    bool
+	allows   int
+	adds     int
+	addTotal int
+}
+
+func (f *fakeToken) Allow(string) bool { f.allows++; return f.allow }
+func (f *fakeToken) Add(_ string, n int) { f.adds++; f.addTotal += n }
+
 func TestTenantLimiter_QPSRejectSkipsConcurrency(t *testing.T) {
 	rate := &fakeRate{allow: false}
 	cc := &fakeConcurrency{admit: true}
-	l := NewTenantLimiter(rate, cc)
+	l := NewTenantLimiter(rate, nil, cc)
 
 	rel, ok := l.Acquire("acme")
 	if ok {
@@ -59,7 +72,7 @@ func TestTenantLimiter_QPSRejectSkipsConcurrency(t *testing.T) {
 func TestTenantLimiter_ConcurrencyReject(t *testing.T) {
 	rate := &fakeRate{allow: true}
 	cc := &fakeConcurrency{admit: false}
-	l := NewTenantLimiter(rate, cc)
+	l := NewTenantLimiter(rate, nil, cc)
 
 	if _, ok := l.Acquire("acme"); ok {
 		t.Fatal("request must be rejected when the concurrency gate denies it")
@@ -75,7 +88,7 @@ func TestTenantLimiter_ConcurrencyReject(t *testing.T) {
 func TestTenantLimiter_BothPassReleasesConcurrency(t *testing.T) {
 	rate := &fakeRate{allow: true}
 	cc := &fakeConcurrency{admit: true}
-	l := NewTenantLimiter(rate, cc)
+	l := NewTenantLimiter(rate, nil, cc)
 
 	rel, ok := l.Acquire("acme")
 	if !ok {
@@ -89,7 +102,7 @@ func TestTenantLimiter_BothPassReleasesConcurrency(t *testing.T) {
 
 func TestTenantLimiter_RateOnly(t *testing.T) {
 	rate := &fakeRate{allow: true}
-	l := NewTenantLimiter(rate, nil) // concurrency disabled
+	l := NewTenantLimiter(rate, nil, nil) // concurrency disabled
 
 	rel, ok := l.Acquire("acme")
 	if !ok {
@@ -105,7 +118,7 @@ func TestTenantLimiter_RateOnly(t *testing.T) {
 
 func TestTenantLimiter_ConcurrencyOnly(t *testing.T) {
 	cc := &fakeConcurrency{admit: true}
-	l := NewTenantLimiter(nil, cc) // QPS disabled
+	l := NewTenantLimiter(nil, nil, cc) // QPS disabled
 
 	rel, ok := l.Acquire("acme")
 	if !ok {
@@ -118,10 +131,53 @@ func TestTenantLimiter_ConcurrencyOnly(t *testing.T) {
 }
 
 func TestTenantLimiter_BothNilAdmitsAll(t *testing.T) {
-	l := NewTenantLimiter(nil, nil)
+	l := NewTenantLimiter(nil, nil, nil)
 	rel, ok := l.Acquire("acme")
 	if !ok {
 		t.Fatal("a limiter with no gates must admit everything")
 	}
 	rel() // no-op
+}
+
+func TestTenantLimiter_TokenRejectSkipsConcurrency(t *testing.T) {
+	rate := &fakeRate{allow: true}
+	tok := &fakeToken{allow: false}
+	cc := &fakeConcurrency{admit: true}
+	l := NewTenantLimiter(rate, tok, cc)
+
+	if _, ok := l.Acquire("acme"); ok {
+		t.Fatal("request must be rejected when the token gate denies it")
+	}
+	if tok.allows != 1 {
+		t.Fatalf("token gate must be consulted once after QPS, got %d", tok.allows)
+	}
+	if cc.acquires != 0 {
+		t.Fatalf("concurrency must not be reached on token rejection, got %d acquires", cc.acquires)
+	}
+}
+
+func TestTenantLimiter_TokenAcquireNeverBooks(t *testing.T) {
+	tok := &fakeToken{allow: true}
+	l := NewTenantLimiter(nil, tok, nil)
+
+	if _, ok := l.Acquire("acme"); !ok {
+		t.Fatal("request must be admitted when the token gate allows it")
+	}
+	// Acquire is an event-time check only: booking happens in the sink, not here.
+	if tok.adds != 0 {
+		t.Fatalf("Acquire must not book tokens, got %d Add calls", tok.adds)
+	}
+}
+
+func TestTenantLimiter_QPSRejectSkipsToken(t *testing.T) {
+	rate := &fakeRate{allow: false}
+	tok := &fakeToken{allow: true}
+	l := NewTenantLimiter(rate, tok, nil)
+
+	if _, ok := l.Acquire("acme"); ok {
+		t.Fatal("request must be rejected on QPS before the token gate")
+	}
+	if tok.allows != 0 {
+		t.Fatalf("token gate must not be consulted on QPS rejection, got %d", tok.allows)
+	}
 }

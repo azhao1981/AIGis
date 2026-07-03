@@ -74,12 +74,22 @@
 - **测试**：`rate_test`（per-tenant 天花板/窗口重置/default/unlimited/租户隔离，注入时钟）+ `composite_test`（QPS 拒不占并发 slot、并发拒、两闸都过 Release 释放、单闸 nil 另一个、两闸皆 nil 全放行）DB-free 全过（`-race`）；CORE_CLEAN
 - **真机 e2e（内存 + Redis 各 2/2）**：`qps_default=2`，同一秒内 3 请求 → 2×200 + 1×429 → sleep 到下一窗口 → 再放行 200；内存版与 Redis 版行为一致
 
+### 配额维度扩展 — token 配额（并发/QPS 之上再加「每周期累计 token 上限」）
+- **事件时间闸门（A1，不预占）**：token 数**响应后才知道**，故 `Acquire` 只做**只读**判断——「本周期已用 ≥ 上限？」→ 是则 429、否则放行；放行的请求**不预扣** token，实际消耗由响应后的用量 sink 记账。允许**一次轻微超额**（末个请求把已用推过上限），换取零预留的简单计数
+- **内存版 `TokenLimiter`**：每租户**固定窗口**（`day`/`hour`/`month`，UTC 周期起点对齐，`periodBounds` 共享给内存/Redis 两版），`Allow`（已用<上限）+ `Add`（记账累加）实现 `TokenGate`；`limitFor` per-tenant/default，0=不限；`now func()` 可注入确定性单测
+- **分布式版 `RedisTokenLimiter`**：key 折进周期起点秒（`aigis:quota:tokens:<tenant>:<periodStart>`，到期自灭）；`Allow`=GET 对比上限、`Add`=Lua `INCRBY`+**首写设 EXPIRE 到周期末**；镜像其余 Redis 闸的 **fail-open**（Redis 挂了 Allow 放行、Add 静默丢）
+- **写半边 `TokenMeteringSink`（核心零改动）**：装饰核心 `usage.Sink`——`Record` 先转发给内层计费 sink，再 `token.Add(tenant, TotalTokens)`；核心本就在响应后调 `usageSink.Record`（此时 TotalTokens 已知），故**包一层 sink 即完成集成**，经 `SetUsageSink` 注入。读半边（`Allow`）走 `TenantLimiter` 的 `Acquire`，二者分离
+- **复合闸扩展**：`TenantLimiter` 加**第三个可选** token 闸，`Acquire` 顺序 **QPS → token → 并发**（QPS/token 拒的请求都不预占并发 slot）；token 闸只在 `Acquire` 读、不在此记账
+- **接线**：`serve.go` `tokenConfig()`（读 `ee.quota.token_default` / `token_per_tenant` / `token_period`）；用量 sink **改在 quota 块之后安装**——token 闸开启则用 `TokenMeteringSink` 包裹计费 sink 再 `SetUsageSink`
+- **测试**：`token_test`（累计到上限拒、跨周期重置 day/hour、per-tenant 隔离、unlimited 不计、Add 翻转 Allow、`ParsePeriod`）+ `composite_test`（token 拒不占并发 slot、Acquire 不记账、QPS 拒不查 token）+ `usage_sink_test`（转发内层 + 按 TotalTokens 记账、0 token 不记、nil 闸仍转发）DB/Redis-free 全过（`-race`）；CORE_CLEAN
+- **真机 e2e（内存 + Redis 各 4/4）**：`token_default=40`、快上游每次回 `total_tokens=18` → 逐个请求（间隔 0.4s 让 deferred 记账落定）：200(0<40)、200(18<40)、200(36<40)、429(54≥40)；内存版与 Redis 版行为一致
+
 ---
 
 ## 待办（TODO / 观察项，按需）
 
 - [ ] **用量不丢的强保证（WAL）**：当前突发过载/DB 长挂仍会丢弃（有计数、不静默）；若计费要求「一条不丢」，需落盘缓冲（WAL / 磁盘队列）重放——重量级，按需再上
-- [ ] **配额维度扩展 — token 配额**：并发 + QPS 已上；剩 token 配额（需读用量库累计消耗、跨窗口，重量级），按需再上
+- [x] **配额维度扩展 — token 配额**：已上——`ee.quota.token_default`/`token_per_tenant`/`token_period`（day/hour/month）；事件时间闸门（响应后记账、不预占，允许一次轻微超额），`TokenMeteringSink` 包裹计费 sink 记账（核心零改动），内存/Redis 双后端；真机 e2e 内存+Redis 各 4/4
 - [x] **API key 近实时失效（pub/sub）**：已上——`ee.auth.pubsub` 开启后 Redis 广播 key 变更，各副本秒级 Reload（轮询兜底并存）；真机双副本 e2e 0.01s 跟随失效
 - [ ] **SaaS batch C2 — 邮箱验证 + 角色细分 + 密码重置**：自助注册（C1）已上；剩邮件验证码激活、租户内 owner/member 角色、密码重置流程——均强依赖 SMTP 发信基建，按需再上
 
@@ -125,7 +135,11 @@ ee:
     qps_default: 0         # 每租户 QPS（每秒请求数，固定窗口）上限，0=不限
     qps_per_tenant:       # 单租户 QPS 覆盖
       tenant-a: 50
-    redis_addr: ""         # 设置后并发+QPS 均跨副本共享（分布式）；否则单进程内存
+    token_default: 0       # 每租户「每周期累计 token」上限，0=不限（事件时间闸门，允许一次轻微超额）
+    token_per_tenant:     # 单租户 token 上限覆盖
+      tenant-a: 1000000
+    token_period: "day"   # token 配额周期：day（默认）| hour | month，UTC 周期起点对齐
+    redis_addr: ""         # 设置后并发+QPS+token 均跨副本共享（分布式）；否则单进程内存
     redis_password: ""
     redis_db: 0
 ```
