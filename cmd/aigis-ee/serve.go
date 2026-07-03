@@ -391,12 +391,18 @@ func seedUsers() []map[string]any {
 //	ee.billing.batch_size          -> events per DB round-trip
 //	ee.billing.flush_interval_ms   -> periodic flush tick (milliseconds)
 //	ee.billing.max_retries         -> batch write retries on DB error
+//	ee.billing.wal.dir             -> WAL directory (empty = WAL disabled, default)
+//	ee.billing.wal.max_seg_mb      -> rotate the active WAL segment past this size
+//	ee.billing.wal.replay_interval_sec -> how often to sweep the WAL back to the DB
 func billingOptions() billing.SinkOptions {
 	return billing.SinkOptions{
-		QueueSize:     viper.GetInt("ee.billing.queue_size"),
-		BatchSize:     viper.GetInt("ee.billing.batch_size"),
-		FlushInterval: time.Duration(viper.GetInt("ee.billing.flush_interval_ms")) * time.Millisecond,
-		MaxRetries:    viper.GetInt("ee.billing.max_retries"),
+		QueueSize:         viper.GetInt("ee.billing.queue_size"),
+		BatchSize:         viper.GetInt("ee.billing.batch_size"),
+		FlushInterval:     time.Duration(viper.GetInt("ee.billing.flush_interval_ms")) * time.Millisecond,
+		MaxRetries:        viper.GetInt("ee.billing.max_retries"),
+		WALDir:            viper.GetString("ee.billing.wal.dir"),
+		WALMaxSegBytes:    int64(viper.GetInt("ee.billing.wal.max_seg_mb")) * 1024 * 1024,
+		WALReplayInterval: time.Duration(viper.GetInt("ee.billing.wal.replay_interval_sec")) * time.Second,
 	}
 }
 

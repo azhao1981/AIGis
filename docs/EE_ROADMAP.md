@@ -84,11 +84,20 @@
 - **测试**：`token_test`（累计到上限拒、跨周期重置 day/hour、per-tenant 隔离、unlimited 不计、Add 翻转 Allow、`ParsePeriod`）+ `composite_test`（token 拒不占并发 slot、Acquire 不记账、QPS 拒不查 token）+ `usage_sink_test`（转发内层 + 按 TotalTokens 记账、0 token 不记、nil 闸仍转发）DB/Redis-free 全过（`-race`）；CORE_CLEAN
 - **真机 e2e（内存 + Redis 各 4/4）**：`token_default=40`、快上游每次回 `total_tokens=18` → 逐个请求（间隔 0.4s 让 deferred 记账落定）：200(0<40)、200(18<40)、200(36<40)、429(54≥40)；内存版与 Redis 版行为一致
 
+### 用量不丢的强保证 — WAL（磁盘预写日志 + 重放）
+- **两个丢弃点兜底**：`PostgresSink` 原有两处「计数但丢弃」——`Record` 队列满（`DroppedFull`）、`writeBatch` 重试耗尽（`DroppedWrite`）；WAL 是**旁路兜底**：正常路径（异步队列→批量入库）完全不变，只有**本会被丢**的事件落盘，后台重放待 DB 恢复后补写，得**至少一次**投递
+- **`WAL` 类型（`ee/billing/wal.go`）**：事件以 JSONL 追加到活跃段 `usage.wal`（`O_APPEND|O_CREATE 0o600`+互斥+fail-loud，镜像 audit.go 打法；含租户/token/请求 ID，owner-only）；超 `maxSegBytes` 轮转为纳秒戳 `usage-<nanos>.seg`（字典序=年龄序）；**惰性开文件**——空闲(从不溢出)的 sink 零磁盘触碰；损坏行（崩溃截断）跳过并告警，不拖累整段
+- **幂等键 `(request_id, ts)`**：`usage_events` 是 Timescale 超表，唯一索引**必须含分区列 ts**；WAL 存 `WALRecord{TS, Event}` **保留原始记账时刻**，重放用 `insertAtSQL` 显式 ts 补写（非重放时刻），使实时写与其后重放**碰撞同一唯一索引**→ `ON CONFLICT DO NOTHING` 去重、绝不重复计费；空 request_id 走**部分索引**（`WHERE request_id <> ''`）排除、照常插入（保持 pre-WAL 行为）
+- **重放环 `replayLoop`/`replayOnce`**：仅 WAL 开启时起后台 goroutine，按 `replayInterval` 扫；`replayOnce` 先 `Rotate` 活跃段（buffered 事件转为可重放 `.seg`）→ 列 pending 段（旧→新）→ 逐段 `ReadSegment`→`writeRecordsAt` 显式 ts 补写→成功才 `RemoveSegment`；**DB 仍挂则保留整段**下轮再试（不重复入库靠 ON CONFLICT，不 hammer 挂掉的 DB）；关停时 `s.done` 触发**最后一次** replayOnce 兜底刚落盘的事件
+- **接线**：`serve.go` `billingOptions()` 读 `ee.billing.wal.dir`（**空=禁用，默认关**，YAGNI 零行为变更）/ `wal.max_seg_mb` / `wal.replay_interval_sec`；migration `002_usage_request_id_unique.sql`（**只写不跑**，用户手动 apply）建部分唯一索引
+- **测试**：`wal_test`（追加→轮转→读回、损坏行跳过、空 Rotate no-op、Close 不轮转留活跃文件、RemoveSegment）+ `reliability_test` 扩展（Record 满队列落 WAL、writeBatch 耗尽整批落 WAL）DB-free 全过（`-race`）；CORE_CLEAN。修了 `Append` 轮转后未重开文件的 bug
+- **真机 e2e（TimescaleDB，PASS）**：TCP 代理挡在真 DB 前 → phase1 三请求正常入库 → **kill 代理(DB 不可达)** 再三请求 → 重试耗尽落 WAL（生成 1 段 3 条）→ **重启代理(DB 恢复)** → 重放环补写 → `/admin/usage` 口径行数=6、tokens=108；**二次 sweep 行数仍 6**（ON CONFLICT 幂等，不重复计数）
+
 ---
 
 ## 待办（TODO / 观察项，按需）
 
-- [ ] **用量不丢的强保证（WAL）**：当前突发过载/DB 长挂仍会丢弃（有计数、不静默）；若计费要求「一条不丢」，需落盘缓冲（WAL / 磁盘队列）重放——重量级，按需再上
+- [x] **用量不丢的强保证（WAL）**：已上——`ee.billing.wal.dir` 开启后，本会被丢的用量（队列满 / 批量写重试耗尽）落盘 JSONL 段，后台重放环待 DB 恢复补写；幂等键 `(request_id, ts)`（保留原始记账时刻 + `ON CONFLICT DO NOTHING`）不重复计费；默认关（YAGNI 零行为变更）；真机 e2e 坏端口模拟 DB 不可达→恢复→重放，行数/tokens 精确、二次 sweep 不重复
 - [x] **配额维度扩展 — token 配额**：已上——`ee.quota.token_default`/`token_per_tenant`/`token_period`（day/hour/month）；事件时间闸门（响应后记账、不预占，允许一次轻微超额），`TokenMeteringSink` 包裹计费 sink 记账（核心零改动），内存/Redis 双后端；真机 e2e 内存+Redis 各 4/4
 - [x] **API key 近实时失效（pub/sub）**：已上——`ee.auth.pubsub` 开启后 Redis 广播 key 变更，各副本秒级 Reload（轮询兜底并存）；真机双副本 e2e 0.01s 跟随失效
 - [ ] **SaaS batch C2 — 邮箱验证 + 角色细分 + 密码重置**：自助注册（C1）已上；剩邮件验证码激活、租户内 owner/member 角色、密码重置流程——均强依赖 SMTP 发信基建，按需再上
@@ -128,6 +137,10 @@ ee:
     batch_size: 100         # 每次入库批量条数（0=默认 100）
     flush_interval_ms: 2000 # 定时刷盘间隔毫秒（0=默认 2000）
     max_retries: 3          # 批量写失败退避重试次数（0=默认 3；负数=不重试）
+    wal:                    # 用量不丢的磁盘预写日志（默认关：dir 留空=禁用，count-and-drop 老行为）
+      dir: ""               # WAL 目录，非空即开启：队列满/批量写耗尽的事件落盘、DB 恢复后重放
+      max_seg_mb: 16        # 活跃段超此大小即轮转为待重放 .seg（0=默认 16MB）
+      replay_interval_sec: 30 # 后台扫 WAL 回灌 DB 的间隔秒（0=默认 30）；需先 apply migration 002 建 (request_id,ts) 唯一索引
   quota:
     default: 0              # 每租户并发上限（in-flight），0=不限
     per_tenant:            # 单租户并发覆盖

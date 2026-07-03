@@ -99,3 +99,63 @@ func TestRecordCountsEnqueuedAndDroppedFull(t *testing.T) {
 		t.Errorf("DroppedFull = %d, want 2", st.DroppedFull)
 	}
 }
+
+func TestRecordOverflowSpoolsToWAL(t *testing.T) {
+	// Queue-full events must land in the WAL instead of being lost.
+	w, err := NewWAL(t.TempDir(), 0, nil)
+	if err != nil {
+		t.Fatalf("NewWAL: %v", err)
+	}
+	defer w.Close()
+
+	s := &PostgresSink{queue: make(chan usage.Event, 1), wal: w}
+	s.Record(t.Context(), usage.Event{Tenant: "acme", RequestID: "r1"}) // enqueued
+	s.Record(t.Context(), usage.Event{Tenant: "acme", RequestID: "r2"}) // overflow -> WAL
+	s.Record(t.Context(), usage.Event{Tenant: "acme", RequestID: "r3"}) // overflow -> WAL
+
+	st := s.Stats()
+	if st.DroppedFull != 2 {
+		t.Errorf("DroppedFull = %d, want 2", st.DroppedFull)
+	}
+	if st.WALSpooled != 2 {
+		t.Errorf("WALSpooled = %d, want 2", st.WALSpooled)
+	}
+
+	// The two overflow events must be recoverable from the WAL.
+	if err := w.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	segs, _ := w.PendingSegments()
+	var total int
+	for _, seg := range segs {
+		recs, _ := w.ReadSegment(seg)
+		total += len(recs)
+	}
+	if total != 2 {
+		t.Errorf("spooled records = %d, want 2", total)
+	}
+}
+
+func TestWriteBatchExhaustedSpoolsToWAL(t *testing.T) {
+	w, err := NewWAL(t.TempDir(), 0, nil)
+	if err != nil {
+		t.Fatalf("NewWAL: %v", err)
+	}
+	defer w.Close()
+
+	s := &PostgresSink{
+		maxRetries: 1,
+		wal:        w,
+		writeFn:    func([]usage.Event) error { return errors.New("db down") },
+	}
+	events := []usage.Event{{RequestID: "a"}, {RequestID: "b"}, {RequestID: "c"}}
+	s.writeBatch(events)
+
+	st := s.Stats()
+	if st.DroppedWrite != int64(len(events)) {
+		t.Errorf("DroppedWrite = %d, want %d", st.DroppedWrite, len(events))
+	}
+	if st.WALSpooled != int64(len(events)) {
+		t.Errorf("WALSpooled = %d, want %d (whole batch spooled)", st.WALSpooled, len(events))
+	}
+}
