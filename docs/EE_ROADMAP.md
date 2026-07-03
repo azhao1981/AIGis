@@ -58,6 +58,14 @@
 - **真机 e2e（PG+Redis，8/8）**：关闭态 /register 404 → 开启缺字段 400 → 注册 201 → 重复 409 → 注册用户能 /login 200 发 cookie → 该用户普通成员访问 /admin/keys 403 → /me 显示 `admin:false`
 - **不做（留 C2）**：邮箱验证/激活、密码重置、owner/member 角色细分、自动开租户——均强依赖 SMTP 发信基建，属另一批
 
+### API key 秒级失效 — Redis pub/sub（轮询之上再加广播）
+- **发布端**：`ee/auth` `PostgresAPIKeyProvider` 加可选 `pub *redis.Client`（`SetPublisher` 注入，nil=不广播）；`CreateKey`/`RevokeKey` 本地 `Reload` 成功后 `Publish` 一条 `aigis:auth:keychange` 通知——发布失败**不回滚**（key 已改成功）、fail-loud 记日志，轮询仍是安全网
+- **订阅端**：`StartSubscribe(ctx, rdb)` 后台 goroutine 订阅该 channel，收到任意消息即触发 `refreshFn`（= `Reload`）——消息内容只是提示，收端永远重载全量快照（不信任消息数据）；go-redis `Channel()` 内部自动重连，Redis 瞬断自愈；`done`/`wg` 管生命周期，`Close` 一并关订阅+pub 连接
+- **与轮询并存**：pub/sub 求快（秒级）、`StartRefresh` 轮询兜底（消息丢/Redis 瞬断也最终一致）；`ee.auth.pubsub`（默认 false）开关，复用 session/quota 的 Redis 端点
+- **接线**：`serve.go` `pubsubEnabled()`；DSN 分支下开启+有 Redis 则 `NewKeyChangeRedis` 建客户端、`SetPublisher`+`StartSubscribe`；无 Redis 则告警退回纯轮询
+- **测试**：`pubsub_test`（nil publisher publish 无 panic 安全、`SetPublisher` 开关、nil client `StartSubscribe` 不起 goroutine/`wg` 不阻塞）Redis-free 全过（`-race`）；CORE_CLEAN
+- **真机双副本 e2e（4/4）**：A/B 共享 DB+同 Redis、`reload_interval_sec=300`（轮询在窗口内基本不触发）→ B 接受 victim key(200) → A DELETE 吊销(204) → **B 于 0.01s 内跟随失效(401)**，证明是 pub/sub 秒级而非 300s 轮询
+
 ### 配额维度扩展 — QPS（并发之上再加速率闸）
 - **内存版 QPS**：`ee/quota` `RateLimiter`——每租户**固定窗口**（1 秒，按墙钟整秒对齐，边界处最多 2× 突发）请求数上限；`limitFor` per-tenant 覆盖 / default，0=不限；`now func()` 可注入，窗口滚动**无 sleep** 确定性单测
 - **分布式 QPS**：`RedisRateLimiter`——Lua `INCR`+`EXPIRE 2`（秒折进 key，每窗口独立计数、到期自灭，无需显式 reset）原子跨副本；镜像并发 `RedisLimiter` 的 **fail-open**（Redis 挂了放行，绝不因 Redis 拖垮网关）
@@ -72,7 +80,7 @@
 
 - [ ] **用量不丢的强保证（WAL）**：当前突发过载/DB 长挂仍会丢弃（有计数、不静默）；若计费要求「一条不丢」，需落盘缓冲（WAL / 磁盘队列）重放——重量级，按需再上
 - [ ] **配额维度扩展 — token 配额**：并发 + QPS 已上；剩 token 配额（需读用量库累计消耗、跨窗口，重量级），按需再上
-- [ ] **API key 近实时失效（pub/sub）**：现为轮询刷新（默认 30s 收敛，有界延迟）；若吊销需秒级跨副本生效，可加 Redis pub/sub 广播失效事件（各副本收到即 Reload）——引入 auth→redis 依赖 + 断连重订阅，按需再上
+- [x] **API key 近实时失效（pub/sub）**：已上——`ee.auth.pubsub` 开启后 Redis 广播 key 变更，各副本秒级 Reload（轮询兜底并存）；真机双副本 e2e 0.01s 跟随失效
 - [ ] **SaaS batch C2 — 邮箱验证 + 角色细分 + 密码重置**：自助注册（C1）已上；剩邮件验证码激活、租户内 owner/member 角色、密码重置流程——均强依赖 SMTP 发信基建，按需再上
 
 ## 相关 OSS 待澄清项（见 TODO.md B 段，按需）
@@ -91,6 +99,7 @@ ee:
     admin_keys:          # 其中拥有 /admin/* 权限的 key 列表
       - "key-xxx"
     reload_interval_sec: 30  # 多副本下后台刷新 key 快照间隔秒（默认 30，≤0=禁用/单副本）
+    pubsub: false            # key 变更 Redis pub/sub 秒级跨副本失效（默认 false）：true 且有 Redis 才广播；轮询始终兜底
     platform_tenant: "ops"   # 平台 admin 所属租户名（默认 ops）：该租户 admin 全租户可见/可管；其余租户 admin 只限本租户
     allow_register: false    # 自助注册开关（默认 false）：true 才暴露 POST /register，注册用户强制普通成员(非 admin)
     session:               # 设置 redis_addr 后启用 SaaS 用户登录（/login /logout /me）

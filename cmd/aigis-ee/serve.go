@@ -106,6 +106,24 @@ var serveCmd = &cobra.Command{
 			// other replicas by periodically reloading from the DB.
 			keyProvider.StartRefresh(authReloadInterval())
 
+			// Optional near-real-time invalidation: with ee.auth.pubsub on and a
+			// Redis available, broadcast key changes so peers refresh within a
+			// second instead of waiting for the poll tick. Polling stays on as the
+			// fail-safe. Reuses the session/quota Redis endpoint.
+			if pubsubEnabled() {
+				if raddr, rpw, rdb := sessionRedis(); raddr != "" {
+					kcRedis, err := auth.NewKeyChangeRedis(cmd.Context(), raddr, rpw, rdb)
+					if err != nil {
+						return fmt.Errorf("failed to init key-change pub/sub: %w", err)
+					}
+					keyProvider.SetPublisher(kcRedis)
+					keyProvider.StartSubscribe(cmd.Context(), kcRedis)
+					globalLogger.Sugar().Info("EE auth: key-change pub/sub enabled (sub-second cross-replica invalidation)")
+				} else {
+					globalLogger.Sugar().Warn("EE auth: ee.auth.pubsub set but no Redis configured — falling back to polling only")
+				}
+			}
+
 			// SaaS dashboard logins (human email+password) sit in front of the
 			// API-key auth when a session store (Redis) is configured: the same
 			// middleware accepts a session cookie OR a Bearer key, so programmatic
@@ -307,6 +325,13 @@ func platformTenant() string {
 // must opt in — an open registration endpoint invites spam accounts.
 func allowRegister() bool {
 	return viper.GetBool("ee.auth.allow_register")
+}
+
+// pubsubEnabled reports whether key changes should be broadcast over Redis
+// pub/sub for sub-second cross-replica invalidation. Reads ee.auth.pubsub;
+// defaults to false (polling-only). Requires a Redis endpoint to take effect.
+func pubsubEnabled() bool {
+	return viper.GetBool("ee.auth.pubsub")
 }
 
 // seedUsers reads the ee.auth.users bootstrap list: each entry declares a

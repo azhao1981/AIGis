@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -43,9 +44,16 @@ type PostgresAPIKeyProvider struct {
 	done      chan struct{}
 	closeOnce sync.Once
 
-	// refreshFn is the action run on each refresh tick. Defaults to Reload;
-	// tests swap it to observe ticks without a real database.
+	// refreshFn is the action run on each refresh tick (and on a pub/sub
+	// notification). Defaults to Reload; tests swap it to observe refreshes
+	// without a real database.
 	refreshFn func(context.Context) error
+
+	// pub is an optional Redis client used to broadcast a key-change event to
+	// other replicas after a local CreateKey/RevokeKey, so they refresh within
+	// a second instead of waiting for the next poll tick. nil = broadcast off
+	// (polling still keeps replicas eventually consistent). Set via SetPublisher.
+	pub *redis.Client
 }
 
 // NewPostgresAPIKeyProvider connects, verifies connectivity, and loads the
@@ -173,7 +181,11 @@ func (p *PostgresAPIKeyProvider) CreateKey(ctx context.Context, rawKey, tenant, 
 		return fmt.Errorf("auth: create key: %w", err)
 	}
 	p.writeAudit(ctx, "create", hashKey(rawKey), tenant, admin, by)
-	return p.Reload(ctx)
+	if err := p.Reload(ctx); err != nil {
+		return err
+	}
+	p.publish(ctx, "create")
+	return nil
 }
 
 // RevokeKey soft-disables a key by its raw value and refreshes the snapshot. by
@@ -192,7 +204,11 @@ func (p *PostgresAPIKeyProvider) RevokeKey(ctx context.Context, rawKey string, b
 		return fmt.Errorf("auth: revoke key: %w", err)
 	}
 	p.writeAudit(ctx, "revoke", hashKey(rawKey), tenant, false, by)
-	return p.Reload(ctx)
+	if err := p.Reload(ctx); err != nil {
+		return err
+	}
+	p.publish(ctx, "revoke")
+	return nil
 }
 
 // KeyTenant returns the tenant a raw key belongs to, or ("", false) if the key is
@@ -337,6 +353,9 @@ func (p *PostgresAPIKeyProvider) Close() {
 	p.closeOnce.Do(func() {
 		close(p.done)
 		p.wg.Wait()
+		if p.pub != nil {
+			_ = p.pub.Close()
+		}
 		p.pool.Close()
 	})
 }
