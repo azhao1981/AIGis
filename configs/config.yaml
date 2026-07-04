@@ -143,6 +143,28 @@ engine:
     #   transforms:
     #     - type: "pii"
     #       config: {}
+    # ---------------------------------------------------------------------------
+    # Azure OpenAI (legacy /openai/deployments 端点)。与原生 OpenAI 两点不同：
+    #   1) api-version 走 query，直接拼进 path(url = base_url + path，透传);
+    #   2) 鉴权用 api-key 请求头(非 Bearer)，故 auth_strategy: header + header_name。
+    # base_url 用你的资源域名，path 里的 deployment 名替换成你的部署(如 gpt-4o)。
+    # KEY 绝不写进本文件——只经 env:AIGIS_AZURE_KEY 注入。
+    # - id: "azure-openai"
+    #   matcher:
+    #     model: "^azure-.*"             # 客户端用 azure-gpt-4o 之类的 model 名
+    #   upstream:
+    #     base_url: "https://<resource>.openai.azure.com"  # 或 env:AIGIS_AZURE_BASE_URL
+    #     path: "/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview"
+    #     auth_strategy: "header"
+    #     header_name: "api-key"
+    #     token_env: "AIGIS_AZURE_KEY"
+    #   transforms:
+    #     - type: "pii"
+    #       config: {}
+    # Anthropic 原生 /v1/messages：与 OpenAI 协议不同——鉴权走 x-api-key 头(非
+    # Bearer)、需带 anthropic-version 头。用 auth_strategy: none + header_policy
+    # 精确设头即可，无需核心改动。base_url 指官方 https://api.anthropic.com/v1
+    # 或你的中转地址；path 为 /messages。pii_claude 按 messages 结构脱敏。
     - id: "claude-proxy"
       matcher:
         model: "^(claude|glm).*"

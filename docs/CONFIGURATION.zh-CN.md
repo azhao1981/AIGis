@@ -17,6 +17,7 @@
   - [Matcher（匹配器）](#matcher匹配器)
   - [Upstream（上游）](#upstream上游)
   - [Header policy（请求头策略）](#header-policy请求头策略)
+  - [Azure OpenAI](#azure-openai)
   - [Transforms（转换）](#transforms转换)
 - [脱敏（PII masking）](#脱敏pii-masking)
   - [内置规则](#内置规则)
@@ -94,6 +95,29 @@ header_policy:
     "x-api-key": "env:AIGIS_ANTHROPIC_KEY"   # env:VAR 请求时解析
   remove: ["authorization"]
 ```
+
+### Azure OpenAI
+
+Azure 仍是 OpenAI 形态，但需两处纯配置改动。上游 URL 为 `base_url + path`（直接拼接），
+所以把 `api-version` query 拼进 `path`，并把鉴权换成 `api-key` 头：
+
+```yaml
+- id: "azure-openai"
+  matcher:
+    model: "^azure-.*"
+  upstream:
+    base_url: "https://<resource>.openai.azure.com"   # 或 env:AIGIS_AZURE_BASE_URL
+    path: "/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview"
+    auth_strategy: "header"
+    header_name: "api-key"
+    token_env: "AIGIS_AZURE_KEY"
+  transforms:
+    - type: "pii"
+      config: {}
+```
+
+deployment 名放进 path（`.../deployments/<deployment>/...`）。KEY 请求时从
+`AIGIS_AZURE_KEY` 读取——切勿硬编码。
 
 ### Transforms（转换）
 

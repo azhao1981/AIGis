@@ -52,12 +52,15 @@ Clients always speak the **OpenAI `/chat/completions`** shape to AIGis; the gate
 | DeepSeek | `https://api.deepseek.com/v1` | `deepseek-*` | `DEEPSEEK_API_KEY` |
 | Qwen (DashScope) | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen*` | `DASHSCOPE_API_KEY` |
 | Moonshot / Kimi | `https://api.moonshot.ai/v1` | `moonshot*` / `kimi*` | `MOONSHOT_API_KEY` |
+| Azure OpenAI | `https://<resource>.openai.azure.com` | `azure-*` | `AIGIS_AZURE_KEY` |
+
+Azure still speaks the OpenAI shape but differs in two ways, both config-only: `api-version` goes in the query (append it to `path`), and auth uses the `api-key` header (`auth_strategy: header`, `header_name: api-key`) instead of Bearer. Put your deployment name in the path, e.g. `/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview`.
 
 **Protocol-translated** — request/response are reshaped by transforms:
 
 | Provider | Path | Notes |
 |----------|------|-------|
-| Anthropic Claude / GLM | `/messages` | `x-api-key` header auth + `pii_claude` transform |
+| Anthropic Claude (native `/v1/messages`) / GLM | `/messages` | `x-api-key` header auth + `anthropic-version` + `pii_claude` transform |
 | Dify | `/chat-messages` | template reshaping + `dify` stream translator |
 
 Ready-to-use route examples for all of the above are in [`configs/config.yaml`](configs/config.yaml) (the OpenAI-compatible ones are commented out — uncomment and set the matching `*_API_KEY`).

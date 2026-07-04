@@ -52,12 +52,15 @@ make build      # 生成 ./bin/aigis
 | DeepSeek | `https://api.deepseek.com/v1` | `deepseek-*` | `DEEPSEEK_API_KEY` |
 | 通义千问(DashScope) | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `qwen*` | `DASHSCOPE_API_KEY` |
 | Moonshot / Kimi | `https://api.moonshot.ai/v1` | `moonshot*` / `kimi*` | `MOONSHOT_API_KEY` |
+| Azure OpenAI | `https://<resource>.openai.azure.com` | `azure-*` | `AIGIS_AZURE_KEY` |
+
+Azure 仍是 OpenAI 形态,但两点不同,均纯配置搞定:`api-version` 走 query(拼进 `path`),鉴权用 `api-key` 头(`auth_strategy: header`、`header_name: api-key`)而非 Bearer。deployment 名放进 path,如 `/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview`。
 
 **协议翻译** — 请求/响应经 transform 重塑:
 
 | Provider | Path | 说明 |
 |----------|------|------|
-| Anthropic Claude / GLM | `/messages` | `x-api-key` 头鉴权 + `pii_claude` transform |
+| Anthropic Claude(原生 `/v1/messages`)/ GLM | `/messages` | `x-api-key` 头鉴权 + `anthropic-version` + `pii_claude` transform |
 | Dify | `/chat-messages` | 模板重塑 + `dify` 流式翻译器 |
 
 以上路由的可用示例均在 [`configs/config.yaml`](configs/config.yaml) 中(OpenAI 兼容那几个默认注释掉了,取消注释并设置对应 `*_API_KEY` 即可)。

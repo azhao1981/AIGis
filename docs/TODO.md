@@ -10,8 +10,9 @@
 
 ## B. 功能方向（需确认是否要做 / 优先级）
 - [x] **更多 provider 适配（兼容类）** — OpenAI 兼容清单已交付：config.yaml 注释态示例（DeepSeek/Qwen/Kimi）+ README 中英兼容表。剩余按需：
-  - [ ] Azure OpenAI legacy（需 `?api-version=` query 注入 + `api-key` 头），留到真有 Azure 用户再做
-  - [ ] Anthropic 原生 `/v1/messages` / Bedrock SigV4（需原生翻译，参考 dify 那套），按需再做
+  - [x] Azure OpenAI legacy（`?api-version=` 拼进 path + `api-key` 头）— 纯配置，无需核心改动。config.yaml 注释态示例 + README/CONFIGURATION 中英文档 + tmp mock e2e 已 PASS
+  - [x] Anthropic 原生 `/v1/messages`（`x-api-key` + `anthropic-version` 头，`pii_claude`）— claude-proxy 路由已支持，补 config/README/CONFIGURATION 说明
+  - [ ] Bedrock SigV4（需 AWS V4 签名新代码：HMAC 密钥派生链 + canonical request + SignedHeaders），独立批次，按需再做
 - [x] **脱敏增强（进阶）** — per-route 额外自定义规则（transform `custom_rules`，进程级编译缓存，不污染共享 scanner）
 - [x] **流式强审核** — 路由 `force_block`：stream 请求内部降级为 blocking，脱敏后做 egress 泄露复检（内置规则漏网即拒发），客户端仍收到伪流式 SSE
 

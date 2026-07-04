@@ -97,6 +97,30 @@ header_policy:
   remove: ["authorization"]
 ```
 
+### Azure OpenAI
+
+Azure speaks the OpenAI shape but needs two config-only tweaks. The upstream URL
+is `base_url + path` (plain concatenation), so append the `api-version` query to
+`path`, and switch auth to the `api-key` header:
+
+```yaml
+- id: "azure-openai"
+  matcher:
+    model: "^azure-.*"
+  upstream:
+    base_url: "https://<resource>.openai.azure.com"   # or env:AIGIS_AZURE_BASE_URL
+    path: "/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview"
+    auth_strategy: "header"
+    header_name: "api-key"
+    token_env: "AIGIS_AZURE_KEY"
+  transforms:
+    - type: "pii"
+      config: {}
+```
+
+Put your deployment name in the path (`.../deployments/<deployment>/...`). The
+key is read from `AIGIS_AZURE_KEY` at request time — never hard-code it.
+
 ### Transforms
 
 `transforms` is an ordered pipeline applied to the **request** body;
