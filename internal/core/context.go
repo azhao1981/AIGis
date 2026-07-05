@@ -159,4 +159,3 @@ func (c *AIGisContext) VaultGetAll() map[string]string {
 	}
 	return copy
 }
-

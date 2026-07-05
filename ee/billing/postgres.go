@@ -22,11 +22,11 @@ import (
 // Defaults for the async batching writer. Tuned so a single request never blocks
 // on the DB: events are buffered and flushed by a background worker.
 const (
-	defaultBatchSize     = 100
-	defaultFlushInterval = 2 * time.Second
-	defaultQueueSize     = 4096
-	defaultMaxRetries    = 3
-	retryBaseDelay       = 200 * time.Millisecond
+	defaultBatchSize      = 100
+	defaultFlushInterval  = 2 * time.Second
+	defaultQueueSize      = 4096
+	defaultMaxRetries     = 3
+	retryBaseDelay        = 200 * time.Millisecond
 	defaultReplayInterval = 30 * time.Second
 )
 
@@ -43,8 +43,8 @@ type SinkOptions struct {
 	// the sink keeps its "count but drop" behavior. When set, dropped events are
 	// spooled to disk and replayed once the DB recovers, giving at-least-once
 	// delivery (idempotent on request_id + ts).
-	WALDir           string
-	WALMaxSegBytes   int64         // rotate the active WAL segment past this size (0 = default)
+	WALDir            string
+	WALMaxSegBytes    int64         // rotate the active WAL segment past this size (0 = default)
 	WALReplayInterval time.Duration // how often to sweep pending segments back to the DB (0 = default)
 }
 
@@ -286,7 +286,7 @@ func (s *PostgresSink) run() {
 // insertSQL is standard PostgreSQL — no Timescale-specific syntax. ts defaults to
 // now() (the live write path). ON CONFLICT makes the write idempotent on
 // (request_id, ts) so a WAL replay of the same event never double-counts; the
-// partial index (request_id <> '') means empty-request_id events are inserted
+// partial index (request_id <> ”) means empty-request_id events are inserted
 // unconditionally (no dedup, matching pre-WAL behavior).
 const insertSQL = `INSERT INTO usage_events
 	(ts, tenant, subject, request_id, route_id, model,

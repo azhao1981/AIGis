@@ -47,7 +47,7 @@ type fakeToken struct {
 	addTotal int
 }
 
-func (f *fakeToken) Allow(string) bool { f.allows++; return f.allow }
+func (f *fakeToken) Allow(string) bool   { f.allows++; return f.allow }
 func (f *fakeToken) Add(_ string, n int) { f.adds++; f.addTotal += n }
 
 func TestTenantLimiter_QPSRejectSkipsConcurrency(t *testing.T) {

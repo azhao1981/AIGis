@@ -51,9 +51,9 @@ type WALRecord struct {
 }
 
 const (
-	activeSegName    = "usage.wal"    // the file currently being appended to
-	rotatedSegSuffix = ".seg"         // rotated, replay-pending segments
-	defaultMaxSegMB  = 16             // rotate the active file past this size
+	activeSegName    = "usage.wal" // the file currently being appended to
+	rotatedSegSuffix = ".seg"      // rotated, replay-pending segments
+	defaultMaxSegMB  = 16          // rotate the active file past this size
 )
 
 // NewWAL opens (or creates) a WAL rooted at dir, creating the directory if

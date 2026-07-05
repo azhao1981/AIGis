@@ -383,9 +383,9 @@ func TestRegisterVerifyDuplicate409(t *testing.T) {
 func TestRegisterVerifyMissingFields400(t *testing.T) {
 	h := emailChain(newFakeEmailUsers(), &fakeMailer{}, EmailOptions{Verify: true})
 	for _, body := range []string{
-		`{"password":"pw123456","tenant":"acme"}`,       // no email
-		`{"email":"x@acme.io","tenant":"acme"}`,         // no password
-		`{"email":"x@acme.io","password":"pw123456"}`,   // no tenant
+		`{"password":"pw123456","tenant":"acme"}`,     // no email
+		`{"email":"x@acme.io","tenant":"acme"}`,       // no password
+		`{"email":"x@acme.io","password":"pw123456"}`, // no tenant
 	} {
 		if rec := doJSON(h, http.MethodPost, "/register", body); rec.Code != http.StatusBadRequest {
 			t.Fatalf("register(verify) %q status = %d, want 400", body, rec.Code)
@@ -399,10 +399,10 @@ func TestEmailFlowsMethodNotAllowed405(t *testing.T) {
 	cases := []struct {
 		method, path string
 	}{
-		{http.MethodGet, "/register"},  // register is POST-only
-		{http.MethodPost, "/verify"},   // verify is GET-only
-		{http.MethodGet, "/forgot"},    // forgot is POST-only
-		{http.MethodGet, "/reset"},     // reset is POST-only
+		{http.MethodGet, "/register"}, // register is POST-only
+		{http.MethodPost, "/verify"},  // verify is GET-only
+		{http.MethodGet, "/forgot"},   // forgot is POST-only
+		{http.MethodGet, "/reset"},    // reset is POST-only
 	}
 	for _, c := range cases {
 		rec := doJSON(h, c.method, c.path, "")

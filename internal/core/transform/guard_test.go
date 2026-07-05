@@ -50,9 +50,9 @@ func TestGuardMaxTokensWithinBudget(t *testing.T) {
 	tr := &GuardTransform{}
 
 	for _, body := range []string{
-		`{"max_tokens":1000}`,          // under budget
-		`{"max_tokens":4096}`,          // exactly budget
-		`{"messages":[]}`,              // no max_tokens field
+		`{"max_tokens":1000}`, // under budget
+		`{"max_tokens":4096}`, // exactly budget
+		`{"messages":[]}`,     // no max_tokens field
 	} {
 		if _, err := tr.Apply(newCtx(), []byte(body), map[string]string{"max_tokens": "4096"}); err != nil {
 			t.Errorf("body %s should pass: %v", body, err)

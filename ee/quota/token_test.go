@@ -109,11 +109,11 @@ func TestTokenLimiter_AddFlipsAllow(t *testing.T) {
 
 func TestParsePeriod(t *testing.T) {
 	cases := map[string]Period{
-		"":       PeriodDay,
-		"day":    PeriodDay,
-		"DAY":    PeriodDay,
-		" hour ": PeriodHour,
-		"month":  PeriodMonth,
+		"":         PeriodDay,
+		"day":      PeriodDay,
+		"DAY":      PeriodDay,
+		" hour ":   PeriodHour,
+		"month":    PeriodMonth,
 		"nonsense": PeriodDay,
 	}
 	for in, want := range cases {
