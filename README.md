@@ -173,6 +173,23 @@ environment variables (AIGIS_*) > command-line flags > config.yaml
 For every config section, the routing model, and how masking works, see the
 [Configuration Guide](docs/CONFIGURATION.md).
 
+### Hot-reload routes & custom rules (SIGHUP)
+
+Sending `SIGHUP` to a running gateway re-reads `engine.routes` and
+`security.custom_rules` from `config.yaml` and atomically swaps them in — no
+restart, no dropped requests. A malformed edit fails loud (logged as an error)
+and leaves the live config untouched, so editing a config file is never able to
+break a running gateway:
+
+```bash
+kill -HUP $(pidof aigis)
+# or, under docker:
+docker exec aigis kill -HUP 1
+```
+
+Other config knobs (log, limit, breaker, cache, retry, audit) still need a
+restart to keep the reload surface small and predictable.
+
 ## Project Structure
 
 ```bash

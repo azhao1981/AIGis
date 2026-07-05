@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,6 +49,12 @@ type HTTPServer struct {
 	breakers *breaker.Set                // per-route circuit breakers (no-op when disabled)
 	cache    *cache.TTLCache             // non-streaming response cache (no-op when disabled)
 	retry    providers.RetryPolicy       // upstream retry policy (zero value = no retry)
+
+	// scannerMu guards scanner swaps during config reloads. The read side
+	// (every masked request) takes RLock to fetch the current pointer; reload
+	// takes Lock to swap in a freshly-built one. nil-safe: NewHTTPServer
+	// always installs a non-nil scanner.
+	scannerMu sync.RWMutex
 
 	// usageSink receives one usage.Event per request. Defaults to usage.NopSink
 	// in the open-source build; the Enterprise Edition injects a metering/billing
@@ -196,6 +203,56 @@ func (s *HTTPServer) SetQuotaLimiter(q quota.Limiter) {
 		q = quota.AllowAll()
 	}
 	s.quota = q
+}
+
+// currentScanner returns the live scanner under the reload RLock. Every gateway
+// request goes through here so a config reload can swap the scanner without
+// restarting the process (see ReloadConfig).
+func (s *HTTPServer) currentScanner() *security.Scanner {
+	s.scannerMu.RLock()
+	defer s.scannerMu.RUnlock()
+	return s.scanner
+}
+
+// ReloadConfig hot-swaps the routing engine and the security scanner from a
+// fresh viper read. Triggered by SIGHUP (see cmd/aigis/serve.go) so route /
+// custom-rule edits apply without restart. Scope is deliberately limited to
+// engine.routes + security.custom_rules — other knobs (log/limit/breaker/cache/
+// retry/audit) still need a restart to keep the surface small and predictable.
+//
+// Fail loud: on any validation error (bad regex, bad custom rule, missing
+// engine section) the live config is left UNTOUCHED and the error returned, so
+// a malformed edit can never break a running gateway.
+func (s *HTTPServer) ReloadConfig() error {
+	newEngineCfg, err := config.LoadEngineConfig()
+	if err != nil {
+		return fmt.Errorf("reload: failed to load engine config: %w", err)
+	}
+	if err := newEngineCfg.Validate(transform.KnownTypes(), transform.KnownStreamTranslators()); err != nil {
+		return fmt.Errorf("reload: invalid engine config: %w", err)
+	}
+	customRules, err := config.LoadCustomRules()
+	if err != nil {
+		return fmt.Errorf("reload: failed to load custom rules: %w", err)
+	}
+	newScanner, err := security.NewScannerWithRules(customRules)
+	if err != nil {
+		return fmt.Errorf("reload: invalid custom rule: %w", err)
+	}
+
+	if err := s.engine.Reload(newEngineCfg); err != nil {
+		return fmt.Errorf("reload: engine swap failed: %w", err)
+	}
+
+	s.scannerMu.Lock()
+	s.scanner = newScanner
+	s.scannerMu.Unlock()
+
+	s.logger.Info("Configuration reloaded",
+		zap.Int("routes", len(newEngineCfg.Routes)),
+		zap.Int("custom_rules", len(customRules)),
+	)
+	return nil
 }
 
 // setupRoutes creates and configures the HTTP routes
@@ -486,7 +543,7 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create universal provider for this route
-	provider := providers.NewUniversalProvider(route, reqLogger, s.scanner).WithRetry(s.retry)
+	provider := providers.NewUniversalProvider(route, reqLogger, s.currentScanner()).WithRetry(s.retry)
 
 	// Branch on streaming: the flusher must be available to stream; otherwise
 	// fall back to blocking. A force_block route is deliberately kept OUT of the

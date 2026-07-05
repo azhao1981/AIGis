@@ -29,13 +29,13 @@
 ### P0 — 定位核心的真实防护缺口
 - [x] **① Private Key 整块脱敏** — 现规则只匹配 `-----BEGIN ... PRIVATE KEY-----` 头部一行，密钥体（base64 块）原样发出。改为匹配 BEGIN…END 整块（含密钥体）。安全 bug 级，最优先。
 - [x] **② 编码内容绕过（base64 二次扫描）** — scanner 只扫明文，PII/secret 塞进 base64 即穿透。对疑似 base64 块解码后二次扫描（命中即按原规则处置）。
-- [ ] **③ 通用高熵 secret 检测** — 现规则全靠已知前缀（sk-/AKIA/ghp_）。补 JWT（`eyJ...`）、赋值型泄露（`password=...`/`secret: ...`）、高熵 token（gitleaks 类标配）。
+- [x] **③ 通用高熵 secret 检测**（Anthropic/Slack/Stripe 平台 token + JWT 三段式带 JSON 校验 + 赋值型 key=value 泄露）
 
 ### P1 — 产品成熟度
 - [x] **④ 审计查询入口**（`GET /admin/audit?limit=&rule=` + UI Masking 面板） — 脱敏审计只写 `audit.jsonl`，OSS 无查询面。加只读 `GET /admin/audit`（近 N 条 + 按规则过滤，仅元数据）+ UI Audit 面板——让用户看见网关拦了什么（产品价值展示面）。
 - [x] **⑤ Claude Code 接入指引 + 部署物料**（Dockerfile + docker-compose + README 中英双语 Claude Code/Docker 章节）
 - [x] **⑥ Prometheus 维度细化**（per-route 请求/失败计数 + 延迟直方图 + per-rule PII 命中计数 + injection/transform 拦截计数）
-- [ ] **⑦ 配置热加载** — routes 改动需重启，网关类产品应支持 SIGHUP/watch 热载（与「写配置/热更新」同批）。
+- [x] **⑦ 配置热加载**（SIGHUP → engine.routes + security.custom_rules 原子替换，fail-loud 不污染在线状态）
 
 > 执行顺序：① → ② → ④ → ⑤ → ⑥；③⑦ 按需。
 

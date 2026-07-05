@@ -49,7 +49,8 @@ func (e *Engine) FindRoute(body []byte) (*Route, error) {
 		return nil, fmt.Errorf("failed to parse request body: %w", err)
 	}
 
-	// Iterate through routes in order
+	// Iterate through routes in order. The slice header is read under the RLock,
+	// so a concurrent Reload cannot mutate it mid-iteration.
 	for i := range e.config.Routes {
 		route := &e.config.Routes[i]
 		routeMatchers := e.matchers[route.ID]
@@ -88,7 +89,37 @@ func (e *Engine) FindRoute(body []byte) (*Route, error) {
 	return nil, nil // No matching route found
 }
 
-// GetConfig returns the engine configuration
+// GetConfig returns a pointer to the engine's current configuration. The
+// pointer is stable across reloads (Reload swaps the Engine's internal state,
+// not the EngineConfig struct a caller holds here); reload-aware consumers
+// should call GetConfig again after a reload rather than caching the result.
 func (e *Engine) GetConfig() *EngineConfig {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	return e.config
+}
+
+// Reload atomically swaps the engine's routes and matchers to newCfg. It
+// pre-compiles all matchers first; any invalid regex returns an error and
+// leaves the live state untouched (fail loud — the gateway keeps running on
+// the previous config rather than silently dropping a bad route).
+func (e *Engine) Reload(newCfg *EngineConfig) error {
+	newMatchers := make(map[string]map[string]*regexp.Regexp, len(newCfg.Routes))
+	for _, route := range newCfg.Routes {
+		routeMatchers := make(map[string]*regexp.Regexp, len(route.Matcher))
+		for jsonPath, pattern := range route.Matcher {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return fmt.Errorf("invalid regex pattern for route %s, path %s: %w", route.ID, jsonPath, err)
+			}
+			routeMatchers[jsonPath] = re
+		}
+		newMatchers[route.ID] = routeMatchers
+	}
+
+	e.mu.Lock()
+	e.config = newCfg
+	e.matchers = newMatchers
+	e.mu.Unlock()
+	return nil
 }

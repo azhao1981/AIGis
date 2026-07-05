@@ -167,6 +167,21 @@ AIGIS_SERVER_PORT=9000 ./bin/aigis serve
 每个配置节、路由模型以及脱敏工作方式，详见
 [配置指南](docs/CONFIGURATION.zh-CN.md)。
 
+### 热加载 routes 与自定义规则（SIGHUP）
+
+向运行中的网关发 `SIGHUP` 会重新读取 `engine.routes` 与 `security.custom_rules`
+并原子替换 —— 无需重启、不丢请求。坏配置会 fail loud（记一条 error 日志）但
+**不影响在线状态**，所以编辑配置文件永远不会搞挂正在运行的网关：
+
+```bash
+kill -HUP $(pidof aigis)
+# 或在 docker 下：
+docker exec aigis kill -HUP 1
+```
+
+其他配置项（log/limit/breaker/cache/retry/audit）仍需重启，故意保持 reload 范围
+小而可控。
+
 ## 项目结构
 
 ```bash

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -378,5 +379,115 @@ func TestAuditEndpoint(t *testing.T) {
 	pResp.Body.Close()
 	if pResp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("POST status = %d, want 405", pResp.StatusCode)
+	}
+}
+
+// TestReloadConfig_HotSwapsRoutes verifies that calling ReloadConfig after
+// changing viper picks up the new routes on the next request — no restart
+// needed. The reload path is what SIGHUP triggers in cmd/aigis/serve.go.
+func TestReloadConfig_HotSwapsRoutes(t *testing.T) {
+	var called atomic.Bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+
+	// Initial routes: matches "test-*" (the setRoutes helper's convention).
+	setRoutes(t, up.URL, []map[string]any{
+		{"type": "pii", "config": map[string]string{}},
+	})
+	zapLog, _ := logger.New("error")
+	srv, err := server.NewHTTPServer(":0", zapLog)
+	if err != nil {
+		t.Fatalf("NewHTTPServer: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Sanity: "test-1" matches before reload.
+	resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"test-1","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("POST pre-reload: %v", err)
+	}
+	resp.Body.Close()
+	if !called.Load() {
+		t.Fatal("pre-reload request did not reach upstream")
+	}
+
+	// Swap to a route that matches "newmodel-*" only.
+	called.Store(false)
+	viper.Set("engine.routes", []map[string]any{
+		{
+			"id":      "new",
+			"matcher": map[string]string{"model": "^newmodel-.*"},
+			"upstream": map[string]any{
+				"base_url":      up.URL,
+				"path":          "/v1/chat/completions",
+				"auth_strategy": "none",
+			},
+			"transforms": []map[string]any{{"type": "pii", "config": map[string]string{}}},
+		},
+		{
+			"id":       "fallback",
+			"matcher":  map[string]any{},
+			"upstream": map[string]any{"base_url": up.URL, "path": "/v1/chat/completions", "auth_strategy": "none"},
+		},
+	})
+
+	if err := srv.ReloadConfig(); err != nil {
+		t.Fatalf("ReloadConfig: %v", err)
+	}
+
+	// The old "test-*" model should now fall through to fallback (NOT the gone
+	// "test" route), and the new "newmodel-*" should hit the new route.
+	resp, err = http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"newmodel-x","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("POST post-reload: %v", err)
+	}
+	resp.Body.Close()
+	if !called.Load() {
+		t.Error("post-reload: newmodel-* did not reach upstream")
+	}
+}
+
+// TestReloadConfig_BadConfigLeavesLiveState verifies that a malformed reload
+// (invalid engine section) returns an error AND leaves the running engine's
+// routes intact — fail loud, never break the live gateway.
+func TestReloadConfig_BadConfigLeavesLiveState(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+
+	setRoutes(t, up.URL, []map[string]any{{"type": "pii", "config": map[string]string{}}})
+	zapLog, _ := logger.New("error")
+	srv, err := server.NewHTTPServer(":0", zapLog)
+	if err != nil {
+		t.Fatalf("NewHTTPServer: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Poison the routes: empty engine.routes must fail Validate, so reload
+	// returns an error and the live "test" route survives.
+	viper.Set("engine.routes", []map[string]any{})
+	t.Cleanup(func() { viper.Set("engine.routes", nil) })
+
+	if err := srv.ReloadConfig(); err == nil {
+		t.Fatal("expected error reloading with empty routes, got nil")
+	}
+
+	// Live request should still work (the original config is unchanged).
+	resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"test-1","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("POST after failed reload: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("after failed reload, status=%d want 200 (live config must be intact)", resp.StatusCode)
 	}
 }

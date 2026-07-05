@@ -2,9 +2,13 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 
 	"aigis/internal/pkg/logger"
 	"aigis/internal/server"
@@ -64,6 +68,22 @@ var serveCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to create server: %w", err)
 		}
+
+		// Hot reload on SIGHUP: re-reads engine.routes + security.custom_rules
+		// from viper and atomically swaps them in (fail loud: bad config leaves
+		// the running state untouched). Other config knobs still need restart.
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGHUP)
+		go func() {
+			for range sigCh {
+				if err := srv.ReloadConfig(); err != nil {
+					globalLogger.Error("SIGHUP reload failed (live config unchanged)",
+						zap.Error(err),
+					)
+				}
+			}
+		}()
+
 		return srv.Start()
 	},
 }
