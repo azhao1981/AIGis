@@ -31,6 +31,14 @@ type RetryPolicy struct {
 	Backoff     time.Duration // base backoff; grows linearly per attempt
 }
 
+// TransformError marks a request rejected by a request-side transform (e.g.
+// injection block, guard budget): the fault is the client's and the upstream
+// was never called, so the gateway maps it to 400 and skips breaker bookkeeping.
+type TransformError struct{ Err error }
+
+func (e *TransformError) Error() string { return "transform error: " + e.Err.Error() }
+func (e *TransformError) Unwrap() error { return e.Err }
+
 // UniversalProvider implements the core.Provider interface with configurable routing
 type UniversalProvider struct {
 	route    *engine.Route
@@ -94,7 +102,7 @@ func (p *UniversalProvider) Send(ctx *core.AIGisContext, body []byte, originalHe
 	// Step 1: Apply request transforms (with bidirectional tokenization)
 	transformedBody, err := p.applyRequestTransforms(ctx, body)
 	if err != nil {
-		return nil, fmt.Errorf("transform error: %w", err)
+		return nil, &TransformError{Err: err}
 	}
 
 	// Step 1b: Strict-review egress check. On force_block routes, scan the
@@ -127,7 +135,7 @@ func (p *UniversalProvider) SendStream(ctx *core.AIGisContext, body []byte, orig
 	// Step 1: Apply request transforms (with bidirectional tokenization)
 	transformedBody, err := p.applyRequestTransforms(ctx, body)
 	if err != nil {
-		return fmt.Errorf("transform error: %w", err)
+		return &TransformError{Err: err}
 	}
 
 	// Step 2: Build and send the upstream request, keeping the body stream open

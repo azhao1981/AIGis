@@ -3,11 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -206,6 +208,10 @@ func (s *HTTPServer) setupRoutes() *http.ServeMux {
 	// Concurrency metrics endpoint: current in-flight, peak, and cumulative totals.
 	mux.HandleFunc("/metrics", s.handleMetrics)
 
+	// Prometheus text-format view of the same counters plus per-route breaker
+	// state. Hand-rolled exposition (no client library dependency).
+	mux.HandleFunc("/metrics/prometheus", s.handlePrometheus)
+
 	// Read-only route config view for the dashboard's Routes panel. Exposes only
 	// structural config (never token values); same tier as /health and /metrics.
 	mux.HandleFunc("/admin/routes-info", s.handleRoutes)
@@ -310,9 +316,15 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate request and trace IDs
-	requestID := generateRequestID()
+	// Request/trace IDs: honor an inbound X-Request-ID (so callers can correlate
+	// their own logs with the gateway's), generate one otherwise, and always echo
+	// it back on the response so every reply is traceable end to end.
+	requestID := sanitizeRequestID(r.Header.Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = generateRequestID()
+	}
 	traceID := uuid.New().String()
+	w.Header().Set("X-Request-ID", requestID)
 
 	// Create a logger with request context
 	reqLogger := s.logger.With(
@@ -464,9 +476,13 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		// Pass the AIGisContext (ctx) for bidirectional tokenization (vault).
 		if err := provider.SendStream(ctx, body, r.Header, w, flusher); err != nil {
 			// If nothing has been written yet the status is still settable; otherwise
-			// the error is logged and the stream simply ends.
+			// the error is logged and the stream simply ends. A transform rejection
+			// is the client's fault and must not count against the breaker.
 			reqLogger.Error("Provider stream error", zap.Error(err))
-			br.RecordFailure()
+			var terr *providers.TransformError
+			if !errors.As(err, &terr) {
+				br.RecordFailure()
+			}
 		} else {
 			succeeded = true
 			br.RecordSuccess()
@@ -488,7 +504,11 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			// Egress-blocked or upstream error: nothing has been written yet, so a
 			// clean SSE error event is still deliverable before the stream ends.
-			br.RecordFailure()
+			// A transform rejection is client-fault and skips breaker bookkeeping.
+			var terr *providers.TransformError
+			if !errors.As(err, &terr) {
+				br.RecordFailure()
+			}
 			reqLogger.Error("Provider error (force_block stream)", zap.Error(err))
 			fmt.Fprintf(w, "data: {\"error\":{\"message\":%q}}\n\n", err.Error())
 			flusher.Flush()
@@ -513,6 +533,15 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	// Pass the AIGisContext (ctx) instead of r.Context() for bidirectional tokenization
 	resp, err := provider.Send(ctx, body, r.Header)
 	if err != nil {
+		// A transform rejection (injection block, guard budget) is the client's
+		// fault and never reached the upstream: return 400 and leave the breaker
+		// untouched so client misuse cannot trip the circuit.
+		var terr *providers.TransformError
+		if errors.As(err, &terr) {
+			reqLogger.Warn("Request rejected by transform", zap.Error(err))
+			http.Error(w, fmt.Sprintf("Request rejected: %v", terr.Err), http.StatusBadRequest)
+			return
+		}
 		br.RecordFailure()
 		reqLogger.Error("Provider error", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Provider error: %v", err), http.StatusBadGateway)
@@ -663,7 +692,56 @@ func (s *HTTPServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handlePrometheus exposes the same counters as /metrics in the Prometheus
+// text exposition format (version 0.0.4), plus each route's breaker state as a
+// gauge (0=closed, 1=half-open, 2=open). Hand-rolled on purpose: the counter
+// set is tiny and stable, so pulling in the client library is not worth the
+// dependency. Content is metadata only — no request bodies, no secrets.
+func (s *HTTPServer) handlePrometheus(w http.ResponseWriter, r *http.Request) {
+	snap := s.metrics.Snapshot()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+	var b strings.Builder
+	writeMetric := func(name, help, typ string, value int64) {
+		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, value)
+	}
+	writeMetric("aigis_requests_in_flight", "Requests currently being handled.", "gauge", snap.InFlight)
+	writeMetric("aigis_requests_peak_concurrency", "High-water mark of concurrent requests.", "gauge", snap.Peak)
+	writeMetric("aigis_requests_total", "Total requests handled.", "counter", snap.Total)
+	writeMetric("aigis_requests_success_total", "Requests that completed successfully.", "counter", snap.Success)
+	writeMetric("aigis_requests_failed_total", "Requests that failed.", "counter", snap.Failed)
+	writeMetric("aigis_uptime_seconds", "Seconds since the gateway started.", "gauge", snap.UptimeSec)
+
+	fmt.Fprintf(&b, "# HELP aigis_route_breaker_state Circuit state per route (0=closed, 1=half-open, 2=open).\n# TYPE aigis_route_breaker_state gauge\n")
+	for _, route := range s.engine.GetConfig().Routes {
+		fmt.Fprintf(&b, "aigis_route_breaker_state{route=%q} %d\n", route.ID, int(s.breakers.Get(route.ID).State()))
+	}
+
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		s.logger.Error("Failed to write prometheus metrics", zap.Error(err))
+	}
+}
+
 // generateRequestID generates a simple request ID for tracking
 func generateRequestID() string {
 	return fmt.Sprintf("req_%d", time.Now().UnixNano())
+}
+
+// sanitizeRequestID validates a caller-supplied X-Request-ID before adopting it:
+// max 64 chars of [A-Za-z0-9._-] only, so an attacker cannot inject log fields,
+// control characters, or oversized values into logs and the audit trail.
+// Anything invalid is discarded (a fresh ID is generated instead).
+func sanitizeRequestID(id string) string {
+	if id == "" || len(id) > 64 {
+		return ""
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_', c == '.':
+		default:
+			return ""
+		}
+	}
+	return id
 }
