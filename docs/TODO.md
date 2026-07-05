@@ -30,7 +30,7 @@
 - [ ] Prometheus `/metrics` 导出
 - [x] **上游重试** — 全局 `retry`：瞬时失败（网络错误 / 429 / 5xx）线性退避重试（`backoff_ms * attempt`），4xx 立即返回；`max_attempts<=1` 默认关闭
 - [x] **多 key 负载均衡** — `upstream.token_envs` 多 key 轮询（原子游标按 route ID 持久化，跳过空值 env，回退单 `token_env`）
-- [ ] Web 管理 UI（大件，与"防 PII 发出去"定位偏弱，按需再做）
+- [x] **Web 管理 UI** — 已有内嵌单页 dashboard(`internal/adminui`, `/ui` + `/ui/capabilities` 能力发现)；本批次新增只读 **Routes 面板**：后端 `/admin/routes-info`(只读, 只暴露 token 的 env 变量名, 绝不泄露 token 值) + 全局 retry 策略 + per-route breaker 状态；OSS 默认 `{status,routes}`, EE 叠加 `{keys,usage,audit}`。写配置/热更新按需再做
 
 ## 待澄清 / 观察项
 - [x] 日志 `upstream` 字段改为打印解析后 URL —— 抽 `Upstream.ResolvedBaseURL()` 统一 env: 解析，日志与请求共用同一来源

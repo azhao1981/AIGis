@@ -128,6 +128,114 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestRoutesInfoEndpoint(t *testing.T) {
+	// A token value that must NEVER appear in the response — only its env NAME may.
+	t.Setenv("AIGIS_ROUTESINFO_SECRET", "super-secret-token-value")
+
+	viper.Set("engine.routes", []map[string]any{
+		{
+			"id":      "info",
+			"matcher": map[string]string{"model": "^info-.*"},
+			"upstream": map[string]any{
+				"base_url":      "http://up.invalid",
+				"path":          "/x",
+				"auth_strategy": "bearer",
+				"token_env":     "AIGIS_ROUTESINFO_SECRET",
+			},
+			"transforms": []map[string]any{{"type": "pii", "config": map[string]string{}}},
+		},
+		{
+			"id":       "fallback",
+			"matcher":  map[string]any{},
+			"upstream": map[string]any{"base_url": "http://up.invalid", "path": "/x", "auth_strategy": "none"},
+		},
+	})
+	t.Cleanup(func() { viper.Set("engine.routes", nil) })
+	viper.Set("retry.max_attempts", 3)
+	viper.Set("retry.backoff_ms", 250)
+	t.Cleanup(func() { viper.Set("retry.max_attempts", nil); viper.Set("retry.backoff_ms", nil) })
+
+	zapLog, _ := logger.New("error")
+	srv, err := server.NewHTTPServer(":0", zapLog)
+	if err != nil {
+		t.Fatalf("NewHTTPServer: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/admin/routes-info")
+	if err != nil {
+		t.Fatalf("GET /admin/routes-info: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+
+	// The token VALUE must never leak; only the env NAME is allowed.
+	if strings.Contains(string(raw), "super-secret-token-value") {
+		t.Fatalf("token value leaked in routes-info: %s", raw)
+	}
+
+	var body struct {
+		Retry struct {
+			MaxAttempts int   `json:"max_attempts"`
+			BackoffMs   int64 `json:"backoff_ms"`
+		} `json:"retry"`
+		Routes []struct {
+			ID       string `json:"id"`
+			Upstream struct {
+				AuthStrategy  string `json:"auth_strategy"`
+				TokenEnv      string `json:"token_env"`
+				TokenKeyCount int    `json:"token_key_count"`
+			} `json:"upstream"`
+			Transforms   []string `json:"transforms"`
+			BreakerState string   `json:"breaker_state"`
+		} `json:"routes"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode routes-info: %v", err)
+	}
+
+	if body.Retry.MaxAttempts != 3 || body.Retry.BackoffMs != 250 {
+		t.Errorf("retry = %+v, want max_attempts=3 backoff_ms=250", body.Retry)
+	}
+	if len(body.Routes) != 2 {
+		t.Fatalf("routes count = %d, want 2", len(body.Routes))
+	}
+	var info *struct {
+		ID       string `json:"id"`
+		Upstream struct {
+			AuthStrategy  string `json:"auth_strategy"`
+			TokenEnv      string `json:"token_env"`
+			TokenKeyCount int    `json:"token_key_count"`
+		} `json:"upstream"`
+		Transforms   []string `json:"transforms"`
+		BreakerState string   `json:"breaker_state"`
+	}
+	for i := range body.Routes {
+		if body.Routes[i].ID == "info" {
+			info = &body.Routes[i]
+		}
+	}
+	if info == nil {
+		t.Fatal("route 'info' missing from routes-info")
+	}
+	if info.Upstream.TokenEnv != "AIGIS_ROUTESINFO_SECRET" {
+		t.Errorf("token_env = %q, want AIGIS_ROUTESINFO_SECRET (name only)", info.Upstream.TokenEnv)
+	}
+	if info.Upstream.TokenKeyCount != 1 {
+		t.Errorf("token_key_count = %d, want 1", info.Upstream.TokenKeyCount)
+	}
+	if len(info.Transforms) != 1 || info.Transforms[0] != "pii" {
+		t.Errorf("transforms = %v, want [pii]", info.Transforms)
+	}
+	if info.BreakerState != "closed" {
+		t.Errorf("breaker_state = %q, want closed", info.BreakerState)
+	}
+}
+
 func TestMetricsEndpoint(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)

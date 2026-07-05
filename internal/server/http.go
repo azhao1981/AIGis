@@ -206,6 +206,10 @@ func (s *HTTPServer) setupRoutes() *http.ServeMux {
 	// Concurrency metrics endpoint: current in-flight, peak, and cumulative totals.
 	mux.HandleFunc("/metrics", s.handleMetrics)
 
+	// Read-only route config view for the dashboard's Routes panel. Exposes only
+	// structural config (never token values); same tier as /health and /metrics.
+	mux.HandleFunc("/admin/routes-info", s.handleRoutes)
+
 	// Gateway endpoints for LLM requests.
 	// Both share one handler; the engine routes by model regardless of inbound path.
 	// /v1/chat/completions: OpenAI-compatible clients
@@ -580,6 +584,73 @@ func (s *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"routes": routes,
 	}); err != nil {
 		s.logger.Error("Failed to encode health", zap.Error(err))
+	}
+}
+
+// handleRoutes returns a read-only, sanitized view of the configured routes for
+// the admin dashboard's Routes panel: each route's matcher, upstream shape, auth
+// strategy, transform types, force_block/stream_translate, and live breaker
+// state, plus the global retry policy. It NEVER reads or emits any token VALUE —
+// only the env variable NAME(s) are exposed (token_env / token_envs), so a
+// secret can never leak through this endpoint. No auth is required (same tier as
+// /health and /metrics); it exposes only structural config, never credentials.
+func (s *HTTPServer) handleRoutes(w http.ResponseWriter, r *http.Request) {
+	type upstreamInfo struct {
+		BaseURL       string   `json:"base_url"`
+		Path          string   `json:"path"`
+		AuthStrategy  string   `json:"auth_strategy"`
+		TokenEnv      string   `json:"token_env,omitempty"`
+		TokenEnvs     []string `json:"token_envs,omitempty"`
+		TokenKeyCount int      `json:"token_key_count"`
+	}
+	type routeInfo struct {
+		ID              string            `json:"id"`
+		Matcher         map[string]string `json:"matcher"`
+		Upstream        upstreamInfo      `json:"upstream"`
+		Transforms      []string          `json:"transforms"`
+		ForceBlock      bool              `json:"force_block"`
+		StreamTranslate string            `json:"stream_translate,omitempty"`
+		BreakerState    string            `json:"breaker_state"`
+	}
+
+	var routes []routeInfo
+	for _, route := range s.engine.GetConfig().Routes {
+		up := route.Upstream
+		keyCount := len(up.TokenEnvs)
+		if keyCount == 0 && up.TokenEnv != "" {
+			keyCount = 1
+		}
+		transforms := make([]string, 0, len(route.Transforms))
+		for _, t := range route.Transforms {
+			transforms = append(transforms, t.Type)
+		}
+		routes = append(routes, routeInfo{
+			ID:      route.ID,
+			Matcher: route.Matcher,
+			Upstream: upstreamInfo{
+				BaseURL:       up.ResolvedBaseURL(),
+				Path:          up.Path,
+				AuthStrategy:  up.AuthStrategy,
+				TokenEnv:      up.TokenEnv,
+				TokenEnvs:     up.TokenEnvs,
+				TokenKeyCount: keyCount,
+			},
+			Transforms:      transforms,
+			ForceBlock:      route.ForceBlock,
+			StreamTranslate: route.StreamTranslate,
+			BreakerState:    s.breakers.Get(route.ID).State().String(),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"retry": map[string]any{
+			"max_attempts": s.retry.MaxAttempts,
+			"backoff_ms":   s.retry.Backoff.Milliseconds(),
+		},
+		"routes": routes,
+	}); err != nil {
+		s.logger.Error("Failed to encode routes", zap.Error(err))
 	}
 }
 

@@ -19,9 +19,9 @@ import (
 	"aigis/internal/server"
 )
 
-// eePanels is what the Enterprise build advertises: the OSS status view plus the
-// data panels backed by the /admin/* endpoints (keys/usage/audit).
-var eePanels = []string{"status", "keys", "usage", "audit"}
+// eePanels is what the Enterprise build advertises: the OSS status + routes
+// views plus the data panels backed by the /admin/* endpoints (keys/usage/audit).
+var eePanels = []string{"status", "routes", "keys", "usage", "audit"}
 
 // CapabilitiesMiddleware intercepts GET /ui/capabilities and replaces the core's
 // status-only response with the full Enterprise panel set, so the embedded

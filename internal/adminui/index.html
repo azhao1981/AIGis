@@ -81,10 +81,11 @@ async function apiJSON(path, opts) {
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function el(id){ return document.getElementById(id); }
 
-// ---- Panel definitions. status ships in OSS; keys/usage/audit only render
-// when the build (via /ui/capabilities) advertises them.
+// ---- Panel definitions. status + routes ship in OSS; keys/usage/audit only
+// render when the build (via /ui/capabilities) advertises them.
 const PANELS = {
   status: { label: "Status", render: renderStatus },
+  routes: { label: "Routes", render: renderRoutes },
   keys:   { label: "API Keys", render: renderKeys },
   usage:  { label: "Usage", render: renderUsage },
   audit:  { label: "Key Audit", render: renderAudit },
@@ -128,6 +129,41 @@ async function renderStatus() {
     ];
     el("statBody").innerHTML = cards.map(([l,n]) => `<div class="stat"><div class="n">${esc(n)}</div><div class="l">${l}</div></div>`).join("");
   } catch(e) { el("statMsg").textContent = e.message; }
+}
+
+// ---- routes: /admin/routes-info (OSS core, read-only). Shows the global retry
+// policy and a per-route table with breaker state, upstream, auth env-var name
+// (never the token value), multi-key count, and transform types.
+async function renderRoutes() {
+  const p = el("panel-routes");
+  p.innerHTML = `<div class="card"><div class="row"><button id="refreshRoutes" class="primary">Refresh</button><span class="muted">route config &amp; circuit state</span></div><div id="retryBox" class="grid"></div></div>
+    <div class="card"><table><thead><tr><th>id</th><th>breaker</th><th>upstream</th><th>auth</th><th>token env</th><th>keys</th><th>transforms</th><th>flags</th></tr></thead><tbody id="rBody"></tbody></table><div class="msg" id="rMsg"></div></div>`;
+  el("refreshRoutes").onclick = renderRoutes;
+  try {
+    const d = await (await fetch("/admin/routes-info", { credentials: "include" })).json();
+    const rt = d.retry || {};
+    el("retryBox").innerHTML = [
+      ["retry max attempts", rt.max_attempts], ["retry backoff (ms)", rt.backoff_ms],
+      ["routes", (d.routes||[]).length],
+    ].map(([l,n]) => `<div class="stat"><div class="n">${esc(n)}</div><div class="l">${l}</div></div>`).join("");
+    el("rBody").innerHTML = (d.routes||[]).map(r => {
+      const u = r.upstream || {};
+      const env = u.token_envs && u.token_envs.length ? u.token_envs.join(", ") : (u.token_env || "—");
+      const state = r.breaker_state || "?";
+      const stateCell = state === "closed" ? state : `<span style="color:var(--danger)">${esc(state)}</span>`;
+      const flags = [r.force_block ? "force_block" : "", r.stream_translate ? "stream:"+r.stream_translate : ""].filter(Boolean).join(" ") || "—";
+      return `<tr>
+        <td><code>${esc(r.id)}</code></td>
+        <td>${stateCell}</td>
+        <td>${esc(u.base_url||"")}${esc(u.path||"")}</td>
+        <td>${esc(u.auth_strategy||"")}</td>
+        <td><code>${esc(env)}</code></td>
+        <td>${esc(u.token_key_count)}</td>
+        <td>${esc((r.transforms||[]).join(", ")||"—")}</td>
+        <td class="muted">${esc(flags)}</td></tr>`;
+    }).join("") || `<tr><td colspan="8" class="muted">no routes</td></tr>`;
+    el("rMsg").textContent = "";
+  } catch(e) { el("rMsg").textContent = e.message; }
 }
 
 // ---- keys: EE /admin/keys (GET list / POST create / DELETE revoke)

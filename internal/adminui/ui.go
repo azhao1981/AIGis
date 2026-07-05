@@ -1,8 +1,9 @@
 // Package adminui serves a single embedded admin dashboard page and a
-// capability-discovery endpoint. The open-source core ships only the "status"
-// panel (health + concurrency metrics). The Enterprise Edition lights up
-// additional panels (keys/usage/audit) by overriding the capabilities response
-// via a server.Middleware — the same page adapts to both builds with no fork.
+// capability-discovery endpoint. The open-source core ships the "status" and
+// "routes" panels (health + concurrency metrics + read-only route config). The
+// Enterprise Edition lights up additional panels (keys/usage/audit) by overriding
+// the capabilities response via a server.Middleware — the same page adapts to
+// both builds with no fork.
 package adminui
 
 import (
@@ -22,9 +23,11 @@ type Capabilities struct {
 }
 
 // DefaultCapabilities is what the open-source core advertises: a read-only
-// gateway status view backed by /health and /metrics.
+// gateway status view (health + concurrency) and a read-only routes view
+// (config + breaker state), both core features backed by /health, /metrics, and
+// /admin/routes-info.
 func DefaultCapabilities() Capabilities {
-	return Capabilities{Panels: []string{"status"}}
+	return Capabilities{Panels: []string{"status", "routes"}}
 }
 
 // RegisterRoutes wires the dashboard page and capability endpoint onto the
