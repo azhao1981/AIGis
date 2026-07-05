@@ -91,8 +91,25 @@ func (s *UserStore) CreateUser(ctx context.Context, email, password, tenant stri
 // DO NOTHING returns ErrEmailTaken instead, so a stranger cannot hijack another
 // user's password/tenant/privileges by re-registering their email. is_admin is
 // hard-coded FALSE — self-registered users are always ordinary members; admin
-// grants come only from bootstrap config or a platform admin.
+// grants come only from bootstrap config or a platform admin. The account is
+// created enabled (immediately usable) — this is the path taken when email
+// verification is off.
 func (s *UserStore) RegisterUser(ctx context.Context, email, password, tenant string) error {
+	return s.registerUser(ctx, email, password, tenant, true)
+}
+
+// RegisterUserPending is the signup path when email verification is ON: it
+// creates the account disabled (enabled=FALSE) so the user cannot log in until
+// they click the verification link (ActivateUser flips enabled=TRUE). Same
+// no-overwrite / non-admin guarantees as RegisterUser.
+func (s *UserStore) RegisterUserPending(ctx context.Context, email, password, tenant string) error {
+	return s.registerUser(ctx, email, password, tenant, false)
+}
+
+// registerUser is the shared self-service INSERT: non-admin, no-overwrite
+// (ON CONFLICT DO NOTHING -> ErrEmailTaken), with enabled controlling whether
+// the account is immediately usable or awaits email verification.
+func (s *UserStore) registerUser(ctx context.Context, email, password, tenant string, enabled bool) error {
 	email = normalizeEmail(email)
 	if email == "" || password == "" || tenant == "" {
 		return fmt.Errorf("users: email, password and tenant are required")
@@ -102,9 +119,9 @@ func (s *UserStore) RegisterUser(ctx context.Context, email, password, tenant st
 		return fmt.Errorf("users: hash password: %w", err)
 	}
 	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO users (email, password_hash, tenant, is_admin) VALUES ($1, $2, $3, FALSE)
+		`INSERT INTO users (email, password_hash, tenant, is_admin, enabled) VALUES ($1, $2, $3, FALSE, $4)
 		 ON CONFLICT (email) DO NOTHING`,
-		email, string(hash), tenant)
+		email, string(hash), tenant, enabled)
 	if err != nil {
 		return fmt.Errorf("users: register user: %w", err)
 	}

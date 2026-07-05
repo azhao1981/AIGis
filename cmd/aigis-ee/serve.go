@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -154,7 +155,30 @@ var serveCmd = &cobra.Command{
 					}
 				}
 				reg := allowRegister()
+				// SMTP-backed account flows (email verify / password reset / role
+				// management). Installed IN FRONT OF the session middleware so it can
+				// intercept /register when verification is on. When SMTP is not
+				// configured the mailer is a no-op and these routes are not mounted.
+				mailer, err := auth.NewMailer(mailerConfig())
+				if err != nil {
+					return fmt.Errorf("failed to init mailer: %w", err)
+				}
+				emailOpts := auth.EmailOptions{
+					Verify:         emailVerify(),
+					BaseURL:        dashboardBaseURL(),
+					PlatformTenant: platformTenant(),
+				}
+				if mailer.Enabled() {
+					// Public email flows run BEFORE auth (token-verified, not
+					// session-authenticated).
+					srv.Use(auth.EmailMiddleware(userStore, mailer, emailOpts, globalLogger))
+				}
 				srv.Use(auth.SessionMiddleware(userStore, sessionStore, keyProvider, reg, globalLogger))
+				if mailer.Enabled() {
+					// Role management runs AFTER auth so the admin Principal is set.
+					srv.Use(auth.RoleMiddleware(userStore, emailOpts, globalLogger))
+					globalLogger.Sugar().Infof("EE auth: SMTP mailer enabled; /verify /forgot /reset active + /admin/users/role (email_verify=%v)", emailVerify())
+				}
 				if reg {
 					globalLogger.Sugar().Info("EE auth: dashboard login enabled (session via Redis); /login /logout /me /register active")
 				} else {
@@ -365,6 +389,41 @@ func allowRegister() bool {
 // defaults to false (polling-only). Requires a Redis endpoint to take effect.
 func pubsubEnabled() bool {
 	return viper.GetBool("ee.auth.pubsub")
+}
+
+// mailerConfig assembles SMTP settings for transactional email (verify/reset).
+// Secrets come from environment variables (never committed): AIGIS_SMTP_HOST,
+// AIGIS_SMTP_PORT, AIGIS_SMTP_USER, AIGIS_SMTP_PASSWORD, AIGIS_SMTP_FROM. An
+// empty host yields a no-op mailer (email-gated flows stay off).
+func mailerConfig() auth.SMTPConfig {
+	port := 0
+	if v := os.Getenv("AIGIS_SMTP_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			port = n
+		}
+	}
+	return auth.SMTPConfig{
+		Host:     os.Getenv("AIGIS_SMTP_HOST"),
+		Port:     port,
+		User:     os.Getenv("AIGIS_SMTP_USER"),
+		Password: os.Getenv("AIGIS_SMTP_PASSWORD"),
+		From:     os.Getenv("AIGIS_SMTP_FROM"),
+	}
+}
+
+// emailVerify reports whether self-service signup requires email verification
+// before the account can log in. Reads ee.auth.email_verify; defaults to false
+// (immediate activation, preserving C1 behavior). Only takes effect when a
+// Mailer is configured.
+func emailVerify() bool {
+	return viper.GetBool("ee.auth.email_verify")
+}
+
+// dashboardBaseURL is the externally reachable origin used to build links in
+// emails (e.g. https://app.example.com). Reads ee.auth.dashboard_url; empty
+// yields relative links.
+func dashboardBaseURL() string {
+	return viper.GetString("ee.auth.dashboard_url")
 }
 
 // seedUsers reads the ee.auth.users bootstrap list: each entry declares a

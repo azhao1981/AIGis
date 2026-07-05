@@ -58,6 +58,16 @@
 - **真机 e2e（PG+Redis，8/8）**：关闭态 /register 404 → 开启缺字段 400 → 注册 201 → 重复 409 → 注册用户能 /login 200 发 cookie → 该用户普通成员访问 /admin/keys 403 → /me 显示 `admin:false`
 - **不做（留 C2）**：邮箱验证/激活、密码重置、owner/member 角色细分、自动开租户——均强依赖 SMTP 发信基建，属另一批
 
+### SaaS — 邮箱验证 + 密码重置 + 角色管理（batch C2）
+- **SMTP 基建（零新依赖）**：`ee/auth` `Mailer` 接口（`Send`/`Enabled`）+ `SMTPConfig`；标准库 `net/smtp`+`crypto/tls`——端口 465 隐式 TLS（`tls.DialWithDialer` 直连）、587/其他明文拨号后 `STARTTLS` 升级；`Host` 空返 `noopMailer`（`Enabled()=false`，邮件相关流程整体不挂载，优雅降级）；凭证只走 env（`AIGIS_SMTP_HOST/PORT/USER/PASSWORD/FROM`，永不落库/落配置）
+- **一次性令牌表**：`migrations/005_email_tokens.sql`——单表 `email_tokens`（token PK / email / purpose / expires_at）服务两条流，`purpose`（`verify`|`reset`）区分防重放；令牌 128bit 随机（如同 session id 视为机密、绝不记日志），消费即删（单次），`expires_at` 界定寿命（默认 2h）
+- **邮箱验证激活**：`UserStore.RegisterUserPending`（复用私有 `registerUser(enabled)` 助手，`enabled=FALSE` 建号）；`GET /verify?token=` `ConsumeToken`→`ActivateUser`（`enabled=TRUE`，幂等）；`VerifyPassword` 本就只放行 `enabled=TRUE`，未验证账号无法登录；`ee.auth.email_verify` 开关（默认 `false` 保留 C1 即时激活）
+- **密码重置**：`POST /forgot {email}` **恒返 200**（不暴露邮箱是否注册）+ 有则发重置链接；`POST /reset {token,password}` `ConsumeToken`+bcrypt `UpdatePassword`；**不强制吊销存量会话**（无 email→session 索引，避免 SCAN 全量；新密码即时生效、旧密码不再认证——KISS/YAGNI）
+- **角色管理**：`POST /admin/users/role {email,admin}` 把 owner/member **映射到既有 `is_admin` 标志**（admin=owner，member=普通），**零 schema 变更**；租户 admin 经 `EffectiveTenant` 限于本租户，平台 admin 跨租户；`SetUserAdmin(email, tenantScope, admin)` 带租户过滤为隔离边界
+- **挂链顺序（关键）**：`EmailMiddleware`（公开流 /register-if-verify、/verify、/forgot、/reset，**token 验证、在 auth 之前**）→ `SessionMiddleware`（认证）→ `RoleMiddleware`（需 admin Principal、**在 auth 之后**，仿 `AdminMiddleware` 挂 /admin/keys）→ `AdminMiddleware`；C1 的 `SessionMiddleware` 签名与其 11 处测试调用点**完全不动**（另立两个中间件而非拓宽既有接口）
+- **测试**：`email_flows_test`（内存 `emailUserAPI` fake + 捕获型 `Mailer` fake，10 例：注册验证 202→激活 200/无效令牌 400、verify 关时 /register 透传、/forgot 恒 200、重置 200+令牌单次 400、缺密码 400、角色非 admin 403/租内晋升 200/跨租 404/平台 admin 任租 200）DB-free 全过；CORE_CLEAN
+- **真机 e2e（PG+Redis+SMTP，12/12）**：注册 202（真实发信）→ 未验证登录 401 → DB 取 token /verify 200 → 验证后登录 200 → /forgot 200 → DB 取 token /reset 200 → 旧密码 401、新密码 200 → 重放重置令牌 400 → admin 登录晋升测试用户 200 且 DB `is_admin=t` → 无 cookie 改角色 401
+
 ### API key 秒级失效 — Redis pub/sub（轮询之上再加广播）
 - **发布端**：`ee/auth` `PostgresAPIKeyProvider` 加可选 `pub *redis.Client`（`SetPublisher` 注入，nil=不广播）；`CreateKey`/`RevokeKey` 本地 `Reload` 成功后 `Publish` 一条 `aigis:auth:keychange` 通知——发布失败**不回滚**（key 已改成功）、fail-loud 记日志，轮询仍是安全网
 - **订阅端**：`StartSubscribe(ctx, rdb)` 后台 goroutine 订阅该 channel，收到任意消息即触发 `refreshFn`（= `Reload`）——消息内容只是提示，收端永远重载全量快照（不信任消息数据）；go-redis `Channel()` 内部自动重连，Redis 瞬断自愈；`done`/`wg` 管生命周期，`Close` 一并关订阅+pub 连接
@@ -100,7 +110,7 @@
 - [x] **用量不丢的强保证（WAL）**：已上——`ee.billing.wal.dir` 开启后，本会被丢的用量（队列满 / 批量写重试耗尽）落盘 JSONL 段，后台重放环待 DB 恢复补写；幂等键 `(request_id, ts)`（保留原始记账时刻 + `ON CONFLICT DO NOTHING`）不重复计费；默认关（YAGNI 零行为变更）；真机 e2e 坏端口模拟 DB 不可达→恢复→重放，行数/tokens 精确、二次 sweep 不重复
 - [x] **配额维度扩展 — token 配额**：已上——`ee.quota.token_default`/`token_per_tenant`/`token_period`（day/hour/month）；事件时间闸门（响应后记账、不预占，允许一次轻微超额），`TokenMeteringSink` 包裹计费 sink 记账（核心零改动），内存/Redis 双后端；真机 e2e 内存+Redis 各 4/4
 - [x] **API key 近实时失效（pub/sub）**：已上——`ee.auth.pubsub` 开启后 Redis 广播 key 变更，各副本秒级 Reload（轮询兜底并存）；真机双副本 e2e 0.01s 跟随失效
-- [ ] **SaaS batch C2 — 邮箱验证 + 角色细分 + 密码重置**：自助注册（C1）已上；剩邮件验证码激活、租户内 owner/member 角色、密码重置流程——均强依赖 SMTP 发信基建，按需再上
+- [x] **SaaS batch C2 — 邮箱验证 + 角色细分 + 密码重置**：SMTP 基建（`net/smtp` 465/587，`noopMailer` 降级）+ `email_tokens` 一次性令牌表；邮箱验证激活（`RegisterUserPending`→`/verify`）、密码重置（`/forgot` 恒 200 + `/reset`）、owner/member 角色映射到 `is_admin`（`/admin/users/role`，`EffectiveTenant` 隔离）；DB-free 单测 10 例 + 真机 PG+Redis+SMTP e2e 12/12 全过
 
 ## 相关 OSS 待澄清项（见 TODO.md B 段，按需）
 - Azure OpenAI legacy（`?api-version=` + `api-key` 头）
@@ -121,6 +131,11 @@ ee:
     pubsub: false            # key 变更 Redis pub/sub 秒级跨副本失效（默认 false）：true 且有 Redis 才广播；轮询始终兜底
     platform_tenant: "ops"   # 平台 admin 所属租户名（默认 ops）：该租户 admin 全租户可见/可管；其余租户 admin 只限本租户
     allow_register: false    # 自助注册开关（默认 false）：true 才暴露 POST /register，注册用户强制普通成员(非 admin)
+    email_verify: false      # 邮箱验证开关（默认 false=即时激活）：true 且配了 SMTP 时，/register 建禁用账号+发验证信，须 /verify 后方可登录
+    dashboard_url: ""        # 外部可达的仪表盘 origin（如 https://app.example.com），用于拼验证/重置邮件里的链接；留空=相对路径
+    # SMTP 发信（C2 邮箱验证/密码重置）走环境变量，永不落配置：
+    #   AIGIS_SMTP_HOST / AIGIS_SMTP_PORT(465隐式TLS|587 STARTTLS) / AIGIS_SMTP_USER / AIGIS_SMTP_PASSWORD / AIGIS_SMTP_FROM
+    #   HOST 留空=noopMailer，/verify /forgot /reset /admin/users/role 均不挂载（优雅降级）
     session:               # 设置 redis_addr 后启用 SaaS 用户登录（/login /logout /me）
       redis_addr: ""       # 会话存储 Redis；留空则复用 ee.quota.redis_addr；都空=纯 API key
       redis_password: ""
