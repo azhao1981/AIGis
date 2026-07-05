@@ -361,3 +361,116 @@ func TestPlatformAdminAnyTenant(t *testing.T) {
 		t.Fatal("platform admin should have promoted the user")
 	}
 }
+
+// --- handler error-branch coverage (DB-free) ---
+
+// TestRegisterVerifyDuplicate409: a second register(verify) for the same email
+// is refused with 409 (the account already exists, disabled).
+func TestRegisterVerifyDuplicate409(t *testing.T) {
+	users := newFakeEmailUsers()
+	h := emailChain(users, &fakeMailer{}, EmailOptions{Verify: true, BaseURL: "https://app.example.com"})
+	body := `{"email":"dup@acme.io","password":"pw123456","tenant":"acme"}`
+	if rec := doJSON(h, http.MethodPost, "/register", body); rec.Code != http.StatusAccepted {
+		t.Fatalf("first register(verify) status = %d, want 202", rec.Code)
+	}
+	if rec := doJSON(h, http.MethodPost, "/register", body); rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate register(verify) status = %d, want 409", rec.Code)
+	}
+}
+
+// TestRegisterVerifyMissingFields400: an incomplete body is rejected before any
+// account is created.
+func TestRegisterVerifyMissingFields400(t *testing.T) {
+	h := emailChain(newFakeEmailUsers(), &fakeMailer{}, EmailOptions{Verify: true})
+	for _, body := range []string{
+		`{"password":"pw123456","tenant":"acme"}`,       // no email
+		`{"email":"x@acme.io","tenant":"acme"}`,         // no password
+		`{"email":"x@acme.io","password":"pw123456"}`,   // no tenant
+	} {
+		if rec := doJSON(h, http.MethodPost, "/register", body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("register(verify) %q status = %d, want 400", body, rec.Code)
+		}
+	}
+}
+
+// TestEmailFlowsMethodNotAllowed405: each public flow rejects the wrong method.
+func TestEmailFlowsMethodNotAllowed405(t *testing.T) {
+	h := emailChain(newFakeEmailUsers(), &fakeMailer{}, EmailOptions{Verify: true})
+	cases := []struct {
+		method, path string
+	}{
+		{http.MethodGet, "/register"},  // register is POST-only
+		{http.MethodPost, "/verify"},   // verify is GET-only
+		{http.MethodGet, "/forgot"},    // forgot is POST-only
+		{http.MethodGet, "/reset"},     // reset is POST-only
+	}
+	for _, c := range cases {
+		rec := doJSON(h, c.method, c.path, "")
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s %s status = %d, want 405", c.method, c.path, rec.Code)
+		}
+	}
+}
+
+// TestEmailFlowsBadJSON400: malformed JSON bodies are rejected with 400.
+func TestEmailFlowsBadJSON400(t *testing.T) {
+	h := emailChain(newFakeEmailUsers(), &fakeMailer{}, EmailOptions{Verify: true})
+	for _, path := range []string{"/register", "/forgot", "/reset"} {
+		rec := doJSON(h, http.MethodPost, path, `{not json`)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s bad-json status = %d, want 400", path, rec.Code)
+		}
+	}
+}
+
+// TestResetUnknownUser400: a syntactically valid reset token that maps to a
+// non-existent user is reported as an invalid token (400), not a distinct error
+// (no probe signal for which emails exist).
+func TestResetUnknownUser400(t *testing.T) {
+	users := newFakeEmailUsers()
+	// Mint a reset token for an email that was never registered.
+	tok, _ := users.IssueToken(context.Background(), "ghost@acme.io", PurposeReset)
+	h := emailChain(users, &fakeMailer{}, EmailOptions{})
+	rec := doJSON(h, http.MethodPost, "/reset", `{"token":"`+tok+`","password":"newpass2"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("reset unknown-user status = %d, want 400", rec.Code)
+	}
+}
+
+// TestRoleUnknownUser404: promoting an email that does not exist yields 404.
+func TestRoleUnknownUser404(t *testing.T) {
+	h := roleChain(newFakeEmailUsers(), EmailOptions{PlatformTenant: "platform"})(okNext())
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/role",
+		strings.NewReader(`{"email":"nobody@acme.io","admin":true}`))
+	req = authed(req, Principal{Tenant: "platform", Subject: "root@platform", Admin: true})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("role unknown-user status = %d, want 404", rec.Code)
+	}
+}
+
+// TestRoleBadRequest400: admin caller, but a body missing email is a 400.
+func TestRoleBadRequest400(t *testing.T) {
+	h := roleChain(newFakeEmailUsers(), EmailOptions{PlatformTenant: "platform"})(okNext())
+	req := httptest.NewRequest(http.MethodPost, "/admin/users/role", strings.NewReader(`{"admin":true}`))
+	req = authed(req, Principal{Tenant: "platform", Subject: "root@platform", Admin: true})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("role missing-email status = %d, want 400", rec.Code)
+	}
+}
+
+// TestNonOwnedPathPassThrough: a path neither middleware owns falls through to
+// next (okNext -> 200), proving they don't over-capture.
+func TestNonOwnedPathPassThrough(t *testing.T) {
+	eh := emailChain(newFakeEmailUsers(), &fakeMailer{}, EmailOptions{Verify: true})
+	if rec := doJSON(eh, http.MethodGet, "/health", ""); rec.Code != http.StatusOK {
+		t.Fatalf("EmailMiddleware /health status = %d, want 200 (passthrough)", rec.Code)
+	}
+	rh := roleChain(newFakeEmailUsers(), EmailOptions{})(okNext())
+	if rec := doJSON(rh, http.MethodGet, "/health", ""); rec.Code != http.StatusOK {
+		t.Fatalf("RoleMiddleware /health status = %d, want 200 (passthrough)", rec.Code)
+	}
+}
