@@ -137,17 +137,24 @@ For every config section, the routing model, and how masking works, see the
 ```bash
   aigis/
   ├── bin/aigis               # build artifact
-  ├── cmd/aigis/
-  │   ├── main.go              # entry point
-  │   ├── root.go              # Cobra root command + Viper config
-  │   └── serve.go             # serve subcommand
+  ├── cmd/aigis/              # entry point + Cobra/Viper CLI (serve subcommand)
   ├── internal/
   │   ├── core/
-  │   │   ├── context.go       # GatewayContext (thread-safe metadata)
+  │   │   ├── context.go       # AIGisContext (thread-safe metadata + secret vault)
   │   │   ├── provider.go      # Provider interface (LLM adapter)
-  │   │   └── processor.go     # Processor interface (middleware)
-  │   └── server/
-  │       └── server.go        # HTTP server (graceful shutdown)
+  │   │   ├── providers/       # UniversalProvider (config-driven adapter)
+  │   │   ├── engine/          # route matching + config validation
+  │   │   ├── transform/       # pii / injection / guard / template / stream translators
+  │   │   ├── security/        # secret scanner (built-in + custom rules)
+  │   │   ├── breaker/         # per-route circuit breaker
+  │   │   ├── limiter/         # global concurrency limit
+  │   │   ├── cache/           # non-streaming response cache
+  │   │   ├── metrics/         # in-flight / success / failed counters
+  │   │   └── audit/           # metadata-only masking audit log
+  │   ├── server/              # HTTP server, gateway handler, middleware chain
+  │   ├── adminui/             # embedded admin dashboard (/ui + capabilities)
+  │   ├── config/              # config loading (env / flags / config.yaml)
+  │   └── pkg/logger/          # structured logging (+ optional rotation)
   ├── configs/
   │   └── config.yaml          # default config
   ├── go.mod

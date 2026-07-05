@@ -135,17 +135,24 @@ AIGIS_SERVER_PORT=9000 ./bin/aigis serve
 ```bash
   aigis/
   ├── bin/aigis               # 编译产物
-  ├── cmd/aigis/
-  │   ├── main.go              # 入口
-  │   ├── root.go              # Cobra 根命令 + Viper 配置
-  │   └── serve.go             # serve 子命令
+  ├── cmd/aigis/              # 入口 + Cobra/Viper 命令行 (serve 子命令)
   ├── internal/
   │   ├── core/
-  │   │   ├── context.go       # GatewayContext (线程安全 metadata)
+  │   │   ├── context.go       # AIGisContext (线程安全 metadata + 脱敏 vault)
   │   │   ├── provider.go      # Provider 接口 (LLM 适配器)
-  │   │   └── processor.go     # Processor 接口 (中间件)
-  │   └── server/
-  │       └── server.go        # HTTP 服务器 (graceful shutdown)
+  │   │   ├── providers/       # UniversalProvider (配置驱动适配器)
+  │   │   ├── engine/          # 路由匹配 + 配置校验
+  │   │   ├── transform/       # pii / injection / guard / template / 流式翻译器
+  │   │   ├── security/        # 敏感数据扫描器 (内置 + 自定义规则)
+  │   │   ├── breaker/         # per-route 熔断器
+  │   │   ├── limiter/         # 全局并发限流
+  │   │   ├── cache/           # 非流式响应缓存
+  │   │   ├── metrics/         # in-flight / success / failed 计数
+  │   │   └── audit/           # 仅元数据的脱敏审计日志
+  │   ├── server/              # HTTP 服务器、网关 handler、中间件链
+  │   ├── adminui/             # 内嵌管理面板 (/ui + capabilities)
+  │   ├── config/              # 配置加载 (env / flags / config.yaml)
+  │   └── pkg/logger/          # 结构化日志 (+ 可选滚动切割)
   ├── configs/
   │   └── config.yaml          # 默认配置
   ├── go.mod
