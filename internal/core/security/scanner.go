@@ -10,10 +10,21 @@ import (
 )
 
 // Rule 定义了敏感信息检测规则
+// Validator, when non-nil, runs on each regex match: only matches it accepts
+// are treated as sensitive. This lets checksum-bearing identifiers (bank cards
+// via Luhn, China ID via GB11643) reject look-alike digit runs, cutting false
+// positives. A nil Validator (all existing/custom rules) keeps prior behavior.
 type Rule struct {
 	Name        string
 	Pattern     *regexp.Regexp
 	Replacement string
+	Validator   func(match string) bool
+}
+
+// valid reports whether a regex match passes the rule's validator (vacuously
+// true when the rule has none).
+func (r Rule) valid(match string) bool {
+	return r.Validator == nil || r.Validator(match)
 }
 
 // Scanner 扫描并清理文本中的敏感信息
@@ -70,7 +81,24 @@ func NewScanner() *Scanner {
 		Replacement: "[EMAIL_REDACTED]",
 	})
 
-	// 7. Mobile Phone - 放在最后
+	// 7. China ID Card - 18 位身份证号，GB11643 校验码验证降误报。
+	// 需在 Mobile Phone 之前注册，避免号段前缀被电话规则截走。
+	scanner.rules = append(scanner.rules, Rule{
+		Name:        "China ID Card",
+		Pattern:     regexp.MustCompile(`\b[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]\b`),
+		Replacement: "[CHINA_ID_REDACTED]",
+		Validator:   validChinaID,
+	})
+
+	// 8. Bank Card - 13-19 位卡号，Luhn 校验降误报（普通数字串不命中）。
+	scanner.rules = append(scanner.rules, Rule{
+		Name:        "Bank Card",
+		Pattern:     regexp.MustCompile(`\b[3-6]\d{12,18}\b`),
+		Replacement: "[BANK_CARD_REDACTED]",
+		Validator:   validLuhn,
+	})
+
+	// 9. Mobile Phone - 放在最后
 	// 中国手机号：13x, 14x, 15x, 16x, 17x, 18x, 19x 开头，11位
 	// 使用 word boundary 避免匹配密钥中的内部数字
 	scanner.rules = append(scanner.rules, Rule{
@@ -82,12 +110,67 @@ func NewScanner() *Scanner {
 	return scanner
 }
 
+// validLuhn reports whether digits passes the Luhn checksum (ISO/IEC 7812),
+// the standard check digit scheme for payment card numbers.
+func validLuhn(digits string) bool {
+	sum, double := 0, false
+	for i := len(digits) - 1; i >= 0; i-- {
+		c := digits[i]
+		if c < '0' || c > '9' {
+			return false
+		}
+		d := int(c - '0')
+		if double {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		double = !double
+	}
+	return sum%10 == 0
+}
+
+// idWeights and idCheckCodes implement the GB11643-1999 (ISO 7064 MOD 11-2)
+// check digit for 18-digit China resident ID numbers.
+var idWeights = [17]int{7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2}
+var idCheckCodes = [11]byte{'1', '0', 'X', '9', '8', '7', '6', '5', '4', '3', '2'}
+
+// validChinaID reports whether an 18-char China ID number's last character
+// matches its GB11643 checksum.
+func validChinaID(id string) bool {
+	if len(id) != 18 {
+		return false
+	}
+	sum := 0
+	for i := 0; i < 17; i++ {
+		c := id[i]
+		if c < '0' || c > '9' {
+			return false
+		}
+		sum += int(c-'0') * idWeights[i]
+	}
+	want := idCheckCodes[sum%11]
+	got := id[17]
+	if got == 'x' {
+		got = 'X'
+	}
+	return got == want
+}
+
 // Sanitize 清理文本中的所有敏感信息
 // 按顺序应用所有规则，返回清理后的文本
 func (s *Scanner) Sanitize(input string) string {
 	result := input
 	for _, rule := range s.rules {
-		result = rule.Pattern.ReplaceAllString(result, rule.Replacement)
+		rule := rule
+		result = rule.Pattern.ReplaceAllStringFunc(result, func(match string) string {
+			if !rule.valid(match) {
+				return match
+			}
+			return rule.Replacement
+		})
 	}
 	return result
 }
@@ -102,8 +185,11 @@ func (s *Scanner) Detect(input string, extra []Rule) []string {
 	var hits []string
 	check := func(rules []Rule) {
 		for _, rule := range rules {
-			if rule.Pattern.MatchString(input) {
-				hits = append(hits, rule.Name)
+			for _, match := range rule.Pattern.FindAllString(input, -1) {
+				if rule.valid(match) {
+					hits = append(hits, rule.Name)
+					break
+				}
 			}
 		}
 	}
@@ -197,6 +283,10 @@ func (s *Scanner) MaskWithExtraRules(ctx interface{}, input string, tags []strin
 
 		// Use ReplaceAllStringFunc to generate unique placeholders for each match
 		result = rule.Pattern.ReplaceAllStringFunc(result, func(match string) string {
+			// Checksum-validated rules skip look-alike matches (see Rule.Validator).
+			if !rule.valid(match) {
+				return match
+			}
 			// Decide which substring of the match is the secret to tokenize.
 			// Default: the whole match. Email-local mode: only the part before
 			// "@", keeping "@domain" (suffix) verbatim after the placeholder.

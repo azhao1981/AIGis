@@ -557,3 +557,79 @@ func TestDetectExtraRules(t *testing.T) {
 		t.Errorf("expected extra rule 'Order ID' among hits, got %v", hits)
 	}
 }
+
+// TestSanitizeBankCardLuhn: only Luhn-valid card numbers are redacted; a
+// look-alike digit run that fails the checksum is left alone.
+func TestSanitizeBankCardLuhn(t *testing.T) {
+	scanner := NewScanner()
+
+	valid := scanner.Sanitize("card 4111111111111111 ok")
+	if !strings.Contains(valid, "[BANK_CARD_REDACTED]") {
+		t.Errorf("Luhn-valid card should be redacted, got: %s", valid)
+	}
+
+	invalid := scanner.Sanitize("number 4111111111111112 ok")
+	if strings.Contains(invalid, "[BANK_CARD_REDACTED]") {
+		t.Errorf("Luhn-invalid digits must NOT be redacted, got: %s", invalid)
+	}
+}
+
+// TestSanitizeChinaIDChecksum: only GB11643-checksum-valid 18-digit IDs are
+// redacted (including lowercase x); an invalid check digit passes through.
+func TestSanitizeChinaIDChecksum(t *testing.T) {
+	scanner := NewScanner()
+
+	valid := scanner.Sanitize("id 11010519491231002X end")
+	if !strings.Contains(valid, "[CHINA_ID_REDACTED]") {
+		t.Errorf("checksum-valid ID should be redacted, got: %s", valid)
+	}
+
+	lower := scanner.Sanitize("id 11010519491231002x end")
+	if !strings.Contains(lower, "[CHINA_ID_REDACTED]") {
+		t.Errorf("lowercase x check digit should be accepted, got: %s", lower)
+	}
+
+	invalid := scanner.Sanitize("id 110105194912310021 end")
+	if strings.Contains(invalid, "[CHINA_ID_REDACTED]") {
+		t.Errorf("checksum-invalid ID must NOT be redacted, got: %s", invalid)
+	}
+}
+
+// TestMaskBankCardVault: a valid card is tokenized into the vault and restored
+// by Unmask; an invalid one is untouched by Mask.
+func TestMaskBankCardVault(t *testing.T) {
+	scanner := NewScanner()
+	ctx := &MockVaultContext{}
+
+	masked := scanner.Mask(ctx, "pay with 4111111111111111 now", nil)
+	if strings.Contains(masked, "4111111111111111") {
+		t.Errorf("valid card should be tokenized, got: %s", masked)
+	}
+	if restored := scanner.Unmask(ctx, masked); !strings.Contains(restored, "4111111111111111") {
+		t.Errorf("card not restored by Unmask, got: %s", restored)
+	}
+
+	untouched := scanner.Mask(&MockVaultContext{}, "ref 4111111111111112 here", nil)
+	if !strings.Contains(untouched, "4111111111111112") {
+		t.Errorf("Luhn-invalid digits must survive Mask, got: %s", untouched)
+	}
+}
+
+// TestDetectValidatorRespected: Detect must apply the validator too, so a
+// Luhn-invalid digit run does not flag the egress leak check.
+func TestDetectValidatorRespected(t *testing.T) {
+	scanner := NewScanner()
+
+	if hits := scanner.Detect("ref 4111111111111112", nil); len(hits) != 0 {
+		t.Errorf("Luhn-invalid digits must not hit Detect, got %v", hits)
+	}
+	found := false
+	for _, h := range scanner.Detect("card 4111111111111111", nil) {
+		if h == "Bank Card" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("Luhn-valid card should hit Detect as 'Bank Card'")
+	}
+}
