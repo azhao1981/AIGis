@@ -81,14 +81,15 @@ async function apiJSON(path, opts) {
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function el(id){ return document.getElementById(id); }
 
-// ---- Panel definitions. status + routes ship in OSS; keys/usage/audit only
-// render when the build (via /ui/capabilities) advertises them.
+// ---- Panel definitions. status + routes + masking ship in OSS; keys/usage/
+// audit only render when the build (via /ui/capabilities) advertises them.
 const PANELS = {
-  status: { label: "Status", render: renderStatus },
-  routes: { label: "Routes", render: renderRoutes },
-  keys:   { label: "API Keys", render: renderKeys },
-  usage:  { label: "Usage", render: renderUsage },
-  audit:  { label: "Key Audit", render: renderAudit },
+  status:  { label: "Status", render: renderStatus },
+  routes:  { label: "Routes", render: renderRoutes },
+  masking: { label: "Masking", render: renderMasking },
+  keys:    { label: "API Keys", render: renderKeys },
+  usage:   { label: "Usage", render: renderUsage },
+  audit:   { label: "Key Audit", render: renderAudit },
 };
 
 function activate(name) {
@@ -164,6 +165,41 @@ async function renderRoutes() {
     }).join("") || `<tr><td colspan="8" class="muted">no routes</td></tr>`;
     el("rMsg").textContent = "";
   } catch(e) { el("rMsg").textContent = e.message; }
+}
+
+// ---- masking: /admin/audit (OSS core, read-only). Tail of the masking audit
+// trail — rule types, counts, placeholders and partially-masked previews only;
+// the endpoint never returns plaintext.
+async function renderMasking() {
+  const p = el("panel-masking");
+  p.innerHTML = `
+    <div class="card">
+      <div class="row">
+        <input id="mRule" placeholder="rule type (e.g. Email)">
+        <input id="mLimit" type="number" placeholder="limit" style="width:90px">
+        <button id="mLoad" class="primary">Load</button>
+        <span class="muted" id="mState"></span>
+      </div>
+      <table><thead><tr><th>ts</th><th>request</th><th>route</th><th>model</th><th>total</th><th>by type</th><th>previews</th></tr></thead><tbody id="mBody"></tbody></table>
+      <div class="msg" id="mMsg"></div>
+    </div>`;
+  el("mLoad").onclick = loadMasking;
+  loadMasking();
+}
+async function loadMasking() {
+  const q = new URLSearchParams();
+  if (el("mRule").value) q.set("rule", el("mRule").value);
+  if (el("mLimit").value) q.set("limit", el("mLimit").value);
+  try {
+    const d = await apiJSON("/admin/audit?" + q);
+    el("mState").textContent = d.enabled ? "audit: enabled" : "audit: disabled";
+    el("mBody").innerHTML = (d.records||[]).map(r => {
+      const byType = Object.entries(r.by_type||{}).map(([k,v]) => `${esc(k)}×${v}`).join(", ");
+      const previews = (r.items||[]).map(i => esc(i.preview)).join(", ");
+      return `<tr><td>${esc(r.timestamp||"")}</td><td><code>${esc(r.request_id||"")}</code></td><td>${esc(r.route_id||"")}</td><td>${esc(r.model||"")}</td><td>${r.total}</td><td>${byType}</td><td class="muted">${previews}</td></tr>`;
+    }).join("") || `<tr><td colspan="7" class="muted">no audit records</td></tr>`;
+    el("mMsg").textContent = "";
+  } catch(e){ el("mMsg").textContent = e.message; }
 }
 
 // ---- keys: EE /admin/keys (GET list / POST create / DELETE revoke)
@@ -338,7 +374,7 @@ function showApp(me) {
 
 (async function init() {
   try { capabilities = await apiJSON("/ui/capabilities"); } catch(_) { capabilities = { panels:["status"] }; }
-  el("build").textContent = capabilities.panels.length > 1 ? "Enterprise" : "OSS";
+  el("build").textContent = capabilities.panels.includes("keys") ? "Enterprise" : "OSS";
 
   // Probe /me to learn whether dashboard logins are enabled and whether we are
   // logged in. A 401 authentication_error means logins are on but we're signed

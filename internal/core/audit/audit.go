@@ -71,6 +71,11 @@ func New(path string, enabled bool, log *zap.Logger) (*Auditor, error) {
 	return &Auditor{f: f, enabled: true, log: log}, nil
 }
 
+// Enabled reports whether the auditor is actually writing records.
+func (a *Auditor) Enabled() bool {
+	return a != nil && a.enabled
+}
+
 // Record writes one audit line for the request, aggregating the context's
 // detections. It is a no-op when auditing is disabled or nothing was masked
 // (clean requests produce no line).

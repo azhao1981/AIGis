@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 
@@ -274,5 +275,108 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 	if snap.InFlight != 0 {
 		t.Errorf("in_flight = %d, want 0 after request done", snap.InFlight)
+	}
+}
+
+// TestAuditEndpoint drives a PII-masking request through the gateway, then
+// verifies GET /admin/audit exposes the resulting record — metadata only,
+// never the plaintext secret — and that rule/limit filters work.
+func TestAuditEndpoint(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer up.Close()
+
+	ts := newGatewayServer(t, up.URL)
+
+	const secret = "audit-probe@example.com"
+	reqID := "audit-test-" + strings.ReplaceAll(t.Name(), "/", "-")
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/messages",
+		strings.NewReader(`{"model":"test-1","messages":[{"role":"user","content":"mail `+secret+`"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", reqID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+
+	// The audit line is written by a defer as the gateway handler returns, which
+	// can race the client seeing the response; poll briefly.
+	type auditResp struct {
+		Enabled bool `json:"enabled"`
+		Records []struct {
+			RequestID string         `json:"request_id"`
+			Total     int            `json:"total"`
+			ByType    map[string]int `json:"by_type"`
+		} `json:"records"`
+	}
+	var mine *struct {
+		RequestID string         `json:"request_id"`
+		Total     int            `json:"total"`
+		ByType    map[string]int `json:"by_type"`
+	}
+	var raw []byte
+	for i := 0; i < 50 && mine == nil; i++ {
+		aResp, err := http.Get(ts.URL + "/admin/audit?rule=Email&limit=10")
+		if err != nil {
+			t.Fatalf("GET /admin/audit: %v", err)
+		}
+		raw, _ = io.ReadAll(aResp.Body)
+		aResp.Body.Close()
+		if aResp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", aResp.StatusCode, raw)
+		}
+		var body auditResp
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatalf("decode audit: %v (body %s)", err, raw)
+		}
+		if !body.Enabled {
+			t.Fatal("enabled = false, want true")
+		}
+		for i := range body.Records {
+			if body.Records[i].RequestID == reqID {
+				mine = &body.Records[i]
+				break
+			}
+		}
+		if mine == nil {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if mine == nil {
+		t.Fatalf("audit record for %s not found (last body %s)", reqID, raw)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Fatalf("plaintext secret leaked via /admin/audit: %s", raw)
+	}
+	if mine.ByType["Email"] < 1 {
+		t.Errorf("by_type = %v, want Email >= 1", mine.ByType)
+	}
+
+	// Rule filter: a rule that never fired must return no records.
+	fResp, err := http.Get(ts.URL + "/admin/audit?rule=NoSuchRule")
+	if err != nil {
+		t.Fatalf("GET filtered: %v", err)
+	}
+	fRaw, _ := io.ReadAll(fResp.Body)
+	fResp.Body.Close()
+	var filtered auditResp
+	if err := json.Unmarshal(fRaw, &filtered); err != nil {
+		t.Fatalf("decode filtered: %v", err)
+	}
+	if len(filtered.Records) != 0 {
+		t.Errorf("filtered records = %d, want 0", len(filtered.Records))
+	}
+
+	// Non-GET is rejected.
+	pResp, err := http.Post(ts.URL+"/admin/audit", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("POST /admin/audit: %v", err)
+	}
+	pResp.Body.Close()
+	if pResp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("POST status = %d, want 405", pResp.StatusCode)
 	}
 }

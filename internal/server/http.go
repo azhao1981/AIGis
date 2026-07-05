@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -216,6 +217,11 @@ func (s *HTTPServer) setupRoutes() *http.ServeMux {
 	// structural config (never token values); same tier as /health and /metrics.
 	mux.HandleFunc("/admin/routes-info", s.handleRoutes)
 
+	// Read-only view of the masking audit trail for the dashboard's Masking
+	// panel. Serves the tail of ./logs/audit.jsonl — metadata only (rule types,
+	// counts, placeholders, partially-masked previews), never plaintext.
+	mux.HandleFunc("/admin/audit", s.handleAudit)
+
 	// Gateway endpoints for LLM requests.
 	// Both share one handler; the engine routes by model regardless of inbound path.
 	// /v1/chat/completions: OpenAI-compatible clients
@@ -383,16 +389,35 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Log request completion with latency on every exit path (streaming included),
-	// reflecting the final success/failure outcome.
+	// reflecting the final success/failure outcome. Also feeds the per-route
+	// failed counter and the latency histogram for Prometheus. routeID is
+	// captured via a closure variable that stays "" if no route matched.
+	var routeID string
 	defer func() {
 		status := "Success"
 		if !succeeded {
 			status = "Failed"
 		}
+		latency := time.Since(ctx.StartTime)
+		s.metrics.RouteOutcome(routeID, succeeded)
+		s.metrics.ObserveLatency(latency)
 		reqLogger.Info("Request finished",
-			zap.Float64("latency_ms", float64(time.Since(ctx.StartTime).Microseconds())/1000),
+			zap.Float64("latency_ms", float64(latency.Microseconds())/1000),
 			zap.String("status", status),
 		)
+	}()
+
+	// Attribute masking hits to the per-rule counter so /metrics/prometheus can
+	// show "what did the gateway actually strip?" by rule name. Runs after the
+	// transform chain has populated ctx.Detections.
+	defer func() {
+		byRule := make(map[string]int)
+		for _, d := range ctx.Detections() {
+			byRule[d.Type]++
+		}
+		for rule, n := range byRule {
+			s.metrics.PIIHit(rule, n)
+		}
 	}()
 
 	reqLogger.Info("Request started",
@@ -419,6 +444,8 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		zap.String("route_id", route.ID),
 		zap.String("upstream", route.Upstream.ResolvedBaseURL()),
 	)
+	routeID = route.ID
+	s.metrics.RouteMatched(route.ID)
 
 	// Stash routing metadata for the audit record (read in the deferred Record).
 	ctx.SetMetadata("route_id", route.ID)
@@ -482,6 +509,8 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 			var terr *providers.TransformError
 			if !errors.As(err, &terr) {
 				br.RecordFailure()
+			} else {
+				noteTransformRejection(s, terr)
 			}
 		} else {
 			succeeded = true
@@ -508,6 +537,8 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 			var terr *providers.TransformError
 			if !errors.As(err, &terr) {
 				br.RecordFailure()
+			} else {
+				noteTransformRejection(s, terr)
 			}
 			reqLogger.Error("Provider error (force_block stream)", zap.Error(err))
 			fmt.Fprintf(w, "data: {\"error\":{\"message\":%q}}\n\n", err.Error())
@@ -538,6 +569,7 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 		// untouched so client misuse cannot trip the circuit.
 		var terr *providers.TransformError
 		if errors.As(err, &terr) {
+			noteTransformRejection(s, terr)
 			reqLogger.Warn("Request rejected by transform", zap.Error(err))
 			http.Error(w, fmt.Sprintf("Request rejected: %v", terr.Err), http.StatusBadRequest)
 			return
@@ -683,6 +715,36 @@ func (s *HTTPServer) handleRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleAudit serves the most recent masking-audit records (newest first) from
+// the JSONL trail as read-only JSON: GET /admin/audit?limit=N&rule=TYPE. The
+// records contain only what the auditor wrote — rule types, counts,
+// placeholders and partially-masked previews — never plaintext secrets, so
+// this sits on the same no-auth tier as /admin/routes-info (EE builds can
+// still gate it via middleware).
+func (s *HTTPServer) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	records, err := audit.Query(auditLogPath, audit.QueryOptions{
+		Limit:    limit,
+		RuleType: r.URL.Query().Get("rule"),
+	})
+	if err != nil {
+		s.logger.Error("Failed to query audit log", zap.Error(err))
+		http.Error(w, `{"error":"failed to read audit log"}`, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"enabled": s.auditor.Enabled(),
+		"records": records,
+	}); err != nil {
+		s.logger.Error("Failed to encode audit records", zap.Error(err))
+	}
+}
+
 // handleMetrics returns a JSON snapshot of concurrency counters for monitoring.
 func (s *HTTPServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	snap := s.metrics.Snapshot()
@@ -693,12 +755,15 @@ func (s *HTTPServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePrometheus exposes the same counters as /metrics in the Prometheus
-// text exposition format (version 0.0.4), plus each route's breaker state as a
-// gauge (0=closed, 1=half-open, 2=open). Hand-rolled on purpose: the counter
-// set is tiny and stable, so pulling in the client library is not worth the
-// dependency. Content is metadata only — no request bodies, no secrets.
+// text exposition format (version 0.0.4), plus per-route counters, a coarse
+// latency histogram, per-rule PII hit counters, and injection/transform
+// rejection totals — the dimensions that map directly to AIGis's egress
+// protection value. Hand-rolled on purpose: the counter set is tiny and stable,
+// so pulling in the client library is not worth the dependency. Content is
+// metadata only — no request bodies, no secrets.
 func (s *HTTPServer) handlePrometheus(w http.ResponseWriter, r *http.Request) {
 	snap := s.metrics.Snapshot()
+	dims := s.metrics.Dimensions()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
 	var b strings.Builder
@@ -711,6 +776,38 @@ func (s *HTTPServer) handlePrometheus(w http.ResponseWriter, r *http.Request) {
 	writeMetric("aigis_requests_success_total", "Requests that completed successfully.", "counter", snap.Success)
 	writeMetric("aigis_requests_failed_total", "Requests that failed.", "counter", snap.Failed)
 	writeMetric("aigis_uptime_seconds", "Seconds since the gateway started.", "gauge", snap.UptimeSec)
+
+	// Per-route request / failure counters (deterministic ordering).
+	fmt.Fprintf(&b, "# HELP aigis_route_requests_total Requests routed to this route.\n# TYPE aigis_route_requests_total counter\n")
+	for _, id := range metrics.SortedKeys(dims.RouteRequests) {
+		fmt.Fprintf(&b, "aigis_route_requests_total{route=%q} %d\n", id, dims.RouteRequests[id])
+	}
+	fmt.Fprintf(&b, "# HELP aigis_route_requests_failed_total Requests routed to this route that failed.\n# TYPE aigis_route_requests_failed_total counter\n")
+	for _, id := range metrics.SortedKeys(dims.RouteFailed) {
+		fmt.Fprintf(&b, "aigis_route_requests_failed_total{route=%q} %d\n", id, dims.RouteFailed[id])
+	}
+
+	// Latency histogram (cumulative buckets, Prometheus convention).
+	fmt.Fprintf(&b, "# HELP aigis_request_duration_ms_bucket Request latency in milliseconds (cumulative buckets).\n# TYPE aigis_request_duration_ms_bucket counter\n")
+	for i, upper := range dims.HistBuckets {
+		fmt.Fprintf(&b, "aigis_request_duration_ms_bucket{le=%q} %d\n", strconv.FormatFloat(upper, 'f', -1, 64), dims.HistCounts[i])
+	}
+	fmt.Fprintf(&b, "aigis_request_duration_ms_bucket{le=\"+Inf\"} %d\n", dims.HistCount)
+	fmt.Fprintf(&b, "# HELP aigis_request_duration_ms_sum Sum of request latencies in milliseconds.\n# TYPE aigis_request_duration_ms_sum counter\naigis_request_duration_ms_sum %g\n", dims.HistSumMs)
+	fmt.Fprintf(&b, "# HELP aigis_request_duration_ms_count Count of latency observations.\n# TYPE aigis_request_duration_ms_count counter\naigis_request_duration_ms_count %d\n", dims.HistCount)
+
+	// Per-rule PII masking hits — the headline "what did AIGis strip?" view.
+	fmt.Fprintf(&b, "# HELP aigis_pii_hits_total Sensitive-info items masked by this rule (e.g. Email, Phone, AWS Access Key).\n# TYPE aigis_pii_hits_total counter\n")
+	for _, rule := range metrics.SortedKeys(dims.PIIHits) {
+		fmt.Fprintf(&b, "aigis_pii_hits_total{rule=%q} %d\n", rule, dims.PIIHits[rule])
+	}
+
+	// Injection / transform-rejection counters (the gateway's "blocked" view).
+	writeMetric("aigis_injection_blocked_total", "Requests rejected by the injection transform.", "counter", dims.InjectionBlocked)
+	fmt.Fprintf(&b, "# HELP aigis_transform_rejected_total Requests rejected by a request-side transform (injection/guard/pii/...).\n# TYPE aigis_transform_rejected_total counter\n")
+	for _, t := range metrics.SortedKeys(dims.TransformRejects) {
+		fmt.Fprintf(&b, "aigis_transform_rejected_total{transform=%q} %d\n", t, dims.TransformRejects[t])
+	}
 
 	fmt.Fprintf(&b, "# HELP aigis_route_breaker_state Circuit state per route (0=closed, 1=half-open, 2=open).\n# TYPE aigis_route_breaker_state gauge\n")
 	for _, route := range s.engine.GetConfig().Routes {
@@ -725,6 +822,19 @@ func (s *HTTPServer) handlePrometheus(w http.ResponseWriter, r *http.Request) {
 // generateRequestID generates a simple request ID for tracking
 func generateRequestID() string {
 	return fmt.Sprintf("req_%d", time.Now().UnixNano())
+}
+
+// noteTransformRejection records a client-side transform rejection in metrics:
+// always attributes to the per-transform counter, and additionally bumps the
+// dedicated injection counter when the rejection came from an "injection" rule.
+func noteTransformRejection(s *HTTPServer, terr *providers.TransformError) {
+	if terr.Transform == "" {
+		return
+	}
+	s.metrics.TransformRejected(terr.Transform)
+	if terr.Transform == "injection" {
+		s.metrics.InjectionBlocked()
+	}
 }
 
 // sanitizeRequestID validates a caller-supplied X-Request-ID before adopting it:

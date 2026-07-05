@@ -23,11 +23,11 @@ type Capabilities struct {
 }
 
 // DefaultCapabilities is what the open-source core advertises: a read-only
-// gateway status view (health + concurrency) and a read-only routes view
-// (config + breaker state), both core features backed by /health, /metrics, and
-// /admin/routes-info.
+// gateway status view (health + concurrency), a read-only routes view
+// (config + breaker state), and a read-only masking-audit view, all core
+// features backed by /health, /metrics, /admin/routes-info and /admin/audit.
 func DefaultCapabilities() Capabilities {
-	return Capabilities{Panels: []string{"status", "routes"}}
+	return Capabilities{Panels: []string{"status", "routes", "masking"}}
 }
 
 // RegisterRoutes wires the dashboard page and capability endpoint onto the

@@ -42,8 +42,9 @@ func TestCapabilitiesDefaultCoreePanels(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &c); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// OSS core advertises the read-only status + routes panels (no EE data panels).
-	want := []string{"status", "routes"}
+	// OSS core advertises the read-only status + routes + masking panels
+	// (no EE data panels).
+	want := []string{"status", "routes", "masking"}
 	if len(c.Panels) != len(want) {
 		t.Fatalf("panels = %v, want %v", c.Panels, want)
 	}
