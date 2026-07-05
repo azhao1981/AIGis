@@ -100,6 +100,34 @@ func TestHandleGateway_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestHealthEndpoint(t *testing.T) {
+	ts := newGatewayServer(t, "http://unused.invalid")
+
+	resp, err := http.Get(ts.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var h struct {
+		Status string            `json:"status"`
+		Routes map[string]string `json:"routes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	// Breaker disabled by default: every route reports "closed" → status "ok".
+	if h.Status != "ok" {
+		t.Errorf("status = %q, want ok", h.Status)
+	}
+	if h.Routes["test"] != "closed" || h.Routes["fallback"] != "closed" {
+		t.Errorf("routes = %v, want all closed", h.Routes)
+	}
+}
+
 func TestMetricsEndpoint(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)

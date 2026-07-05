@@ -57,6 +57,11 @@ type Upstream struct {
 	AuthStrategy string `mapstructure:"auth_strategy"`
 	// TokenEnv is the environment variable name to read the token from
 	TokenEnv string `mapstructure:"token_env"`
+	// TokenEnvs is an optional list of env var names for multi-key load
+	// balancing: the provider round-robins across the keys that resolve to a
+	// non-empty value. When empty, TokenEnv (single key) is used; when set, it
+	// takes precedence over TokenEnv.
+	TokenEnvs []string `mapstructure:"token_envs"`
 	// HeaderName is the header name for "header" auth strategy (default: "Authorization")
 	HeaderName string `mapstructure:"header_name"`
 }

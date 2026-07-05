@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -20,6 +22,15 @@ import (
 	"aigis/internal/pkg/logger"
 )
 
+// RetryPolicy configures upstream retry on transient failures. MaxAttempts <= 1
+// disables retry (a single try), preserving the default behavior. Only network
+// errors and 429/5xx responses are retried (see isRetryable); a 4xx is a client
+// error and is returned immediately.
+type RetryPolicy struct {
+	MaxAttempts int           // total tries including the first (1 = no retry)
+	Backoff     time.Duration // base backoff; grows linearly per attempt
+}
+
 // UniversalProvider implements the core.Provider interface with configurable routing
 type UniversalProvider struct {
 	route    *engine.Route
@@ -27,6 +38,20 @@ type UniversalProvider struct {
 	scanner  *security.Scanner   // used for streaming line-by-line unmask
 	registry *transform.Registry // pluggable request/response transformers
 	log      *logger.Logger
+	retry    RetryPolicy // upstream retry policy (zero value = no retry)
+}
+
+// rrCursors holds the multi-key round-robin cursor per route ID. A new
+// UniversalProvider is built for every request (see handleGateway), so the
+// cursor cannot live on the provider or it would reset each time; it is keyed by
+// the stable route ID here so the rotation persists across requests.
+var rrCursors sync.Map // route ID -> *uint64
+
+// nextRRIndex atomically advances and returns the round-robin index for a route.
+func nextRRIndex(routeID string, n int) int {
+	v, _ := rrCursors.LoadOrStore(routeID, new(uint64))
+	c := v.(*uint64)
+	return int((atomic.AddUint64(c, 1) - 1) % uint64(n))
 }
 
 // NewUniversalProvider creates a new universal provider for the given route.
@@ -50,6 +75,13 @@ func NewUniversalProvider(route *engine.Route, log *logger.Logger, scanner *secu
 			Timeout: 60 * time.Second,
 		},
 	}
+}
+
+// WithRetry sets the upstream retry policy and returns the provider for
+// chaining. A zero/MaxAttempts<=1 policy leaves retry off (the default).
+func (p *UniversalProvider) WithRetry(policy RetryPolicy) *UniversalProvider {
+	p.retry = policy
+	return p
 }
 
 // ID returns the route ID as the provider identifier
@@ -242,12 +274,32 @@ func (p *UniversalProvider) buildUpstreamHeaders(originalHeaders http.Header, au
 	return upstreamHeaders
 }
 
+// selectToken resolves the upstream token, round-robining across TokenEnvs when
+// multi-key load balancing is configured. It skips env vars that resolve to an
+// empty value so a missing key never becomes an empty Authorization header. When
+// TokenEnvs is empty (or none resolve), it falls back to the single TokenEnv.
+func (p *UniversalProvider) selectToken() string {
+	envs := p.route.Upstream.TokenEnvs
+	if len(envs) > 0 {
+		var keys []string
+		for _, name := range envs {
+			if v := os.Getenv(name); v != "" {
+				keys = append(keys, v)
+			}
+		}
+		if len(keys) > 0 {
+			return keys[nextRRIndex(p.route.ID, len(keys))]
+		}
+	}
+	return os.Getenv(p.route.Upstream.TokenEnv)
+}
+
 // buildAuthHeaders constructs authentication headers based on the route's AuthStrategy
 func (p *UniversalProvider) buildAuthHeaders() http.Header {
 	headers := make(http.Header)
 	upstream := p.route.Upstream
 
-	token := os.Getenv(upstream.TokenEnv)
+	token := p.selectToken()
 	if token == "" {
 		return headers
 	}
@@ -314,7 +366,7 @@ func (p *UniversalProvider) buildUpstreamRequest(ctx context.Context, body []byt
 
 	// Handle query params for AuthStrategyQuery
 	if upstream.AuthStrategy == engine.AuthStrategyQuery {
-		token := os.Getenv(upstream.TokenEnv)
+		token := p.selectToken()
 		if token != "" {
 			// Parse URL and add query param
 			if reqURL, err := http.NewRequest(http.MethodPost, url, nil); err == nil {
@@ -348,32 +400,78 @@ func (p *UniversalProvider) buildUpstreamRequest(ctx context.Context, body []byt
 	return httpReq, nil
 }
 
-// sendToUpstream sends the transformed request to the upstream service with header handling
+// sendToUpstream sends the transformed request to the upstream, retrying on
+// transient failures per the retry policy. Retries only cover network errors
+// and 429/5xx responses (isRetryable); a 4xx returns immediately. With the
+// default policy (MaxAttempts <= 1) this is a single attempt.
 func (p *UniversalProvider) sendToUpstream(ctx context.Context, body []byte, originalHeaders http.Header) ([]byte, error) {
-	httpReq, err := p.buildUpstreamRequest(ctx, body, originalHeaders)
-	if err != nil {
-		return nil, err
+	attempts := p.retry.MaxAttempts
+	if attempts < 1 {
+		attempts = 1
 	}
 
-	// Execute request
+	var respBody []byte
+	var status int
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		respBody, status, err = p.doOnce(ctx, body, originalHeaders)
+		if err == nil {
+			return respBody, nil
+		}
+		// Stop early on a non-retryable failure or after the last attempt.
+		if attempt == attempts || !isRetryable(status) {
+			break
+		}
+		wait := p.retry.Backoff * time.Duration(attempt)
+		p.log.Warn("Upstream attempt failed, retrying",
+			zap.String("route_id", p.route.ID),
+			zap.Int("attempt", attempt),
+			zap.Int("status", status),
+			zap.Duration("backoff", wait),
+			zap.Error(err),
+		)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil, err
+}
+
+// doOnce performs a single upstream call and returns the response body, the
+// HTTP status (0 on a transport-level error), and an error. On a non-200
+// status the error carries handleHTTPError's message; status is returned so the
+// caller can decide whether to retry.
+func (p *UniversalProvider) doOnce(ctx context.Context, body []byte, originalHeaders http.Header) ([]byte, int, error) {
+	httpReq, err := p.buildUpstreamRequest(ctx, body, originalHeaders)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
+		return nil, 0, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Read response
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, resp.StatusCode, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Handle HTTP errors
 	if resp.StatusCode != http.StatusOK {
-		return nil, p.handleHTTPError(resp.StatusCode, respBody)
+		return nil, resp.StatusCode, p.handleHTTPError(resp.StatusCode, respBody)
 	}
 
-	return respBody, nil
+	return respBody, resp.StatusCode, nil
+}
+
+// isRetryable reports whether an upstream failure with the given status is worth
+// retrying: a transport error (status 0), 429 (rate limited), or any 5xx. A 4xx
+// (other than 429) is a client error that a retry won't fix.
+func isRetryable(status int) bool {
+	return status == 0 || status == http.StatusTooManyRequests || status >= 500
 }
 
 // handleHTTPError handles HTTP error responses

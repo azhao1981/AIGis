@@ -44,6 +44,7 @@ type HTTPServer struct {
 	limiter  *limiter.ConcurrencyLimiter // global in-flight cap (no-op when unconfigured)
 	breakers *breaker.Set                // per-route circuit breakers (no-op when disabled)
 	cache    *cache.TTLCache             // non-streaming response cache (no-op when disabled)
+	retry    providers.RetryPolicy       // upstream retry policy (zero value = no retry)
 
 	// usageSink receives one usage.Event per request. Defaults to usage.NopSink
 	// in the open-source build; the Enterprise Edition injects a metering/billing
@@ -146,6 +147,12 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 		zap.Int("max_entries", config.CacheMaxEntries()),
 	)
 
+	retryPolicy := config.RetryConfig()
+	extLogger.Info("Upstream retry initialized",
+		zap.Int("max_attempts", retryPolicy.MaxAttempts), // 1 = no retry
+		zap.Duration("backoff", retryPolicy.Backoff),
+	)
+
 	s := &HTTPServer{
 		Server:    baseServer,
 		engine:    eng,
@@ -156,6 +163,7 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 		limiter:   limiter.New(maxConcurrent),
 		breakers:  breaker.NewSet(breakerCfg),
 		cache:     cache.New(cacheTTL, config.CacheMaxEntries()),
+		retry:     retryPolicy,
 		usageSink: usage.NopSink{},
 		quota:     quota.AllowAll(),
 	}
@@ -191,11 +199,9 @@ func (s *HTTPServer) SetQuotaLimiter(q quota.Limiter) {
 func (s *HTTPServer) setupRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Health check endpoint
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
-	})
+	// Health / readiness endpoint: aggregates liveness with each route's circuit
+	// state so a load balancer or k8s readiness probe can see degradation.
+	mux.HandleFunc("/health", s.handleHealth)
 
 	// Concurrency metrics endpoint: current in-flight, peak, and cumulative totals.
 	mux.HandleFunc("/metrics", s.handleMetrics)
@@ -437,7 +443,7 @@ func (s *HTTPServer) handleGateway(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create universal provider for this route
-	provider := providers.NewUniversalProvider(route, reqLogger, s.scanner)
+	provider := providers.NewUniversalProvider(route, reqLogger, s.scanner).WithRetry(s.retry)
 
 	// Branch on streaming: the flusher must be available to stream; otherwise
 	// fall back to blocking. A force_block route is deliberately kept OUT of the
@@ -542,6 +548,38 @@ func applyUsageTokens(e *usage.Event, resp []byte) {
 		e.TotalTokens = int(total.Int())
 	} else {
 		e.TotalTokens = e.PromptTokens + e.CompletionTokens
+	}
+}
+
+// handleHealth reports liveness plus per-route circuit state. It always returns
+// HTTP 200 (the process is alive and can still serve routes whose upstreams are
+// healthy); the body's "status" is "degraded" when any route's breaker is not
+// closed, so a readiness probe / dashboard can surface the degradation without
+// taking the whole gateway out of rotation. Breaker states only appear when the
+// breaker is enabled (otherwise all routes are trivially "closed").
+func (s *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	routes := map[string]string{}
+	degraded := false
+	for _, route := range s.engine.GetConfig().Routes {
+		state := s.breakers.Get(route.ID).State().String()
+		routes[route.ID] = state
+		if state != "closed" {
+			degraded = true
+		}
+	}
+
+	status := "ok"
+	if degraded {
+		status = "degraded"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"status": status,
+		"routes": routes,
+	}); err != nil {
+		s.logger.Error("Failed to encode health", zap.Error(err))
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"aigis/internal/core/breaker"
 	"aigis/internal/core/engine"
+	"aigis/internal/core/providers"
 	"aigis/internal/core/security"
 )
 
@@ -109,6 +110,25 @@ func BreakerConfig() breaker.Config {
 // `limit.max_concurrent`. Defaults to 0 (unlimited) when the key is absent.
 func MaxConcurrent() int {
 	return viper.GetInt("limit.max_concurrent")
+}
+
+// RetryConfig returns the upstream retry policy from the `retry` section:
+// `retry.max_attempts` (total tries incl. the first; <=1 or absent = no retry)
+// and `retry.backoff_ms` (base backoff, default 200ms). Only network errors and
+// 429/5xx responses are retried; retry is off by default.
+func RetryConfig() providers.RetryPolicy {
+	attempts := viper.GetInt("retry.max_attempts")
+	if attempts < 1 {
+		attempts = 1
+	}
+	backoff := viper.GetInt("retry.backoff_ms")
+	if backoff <= 0 {
+		backoff = 200
+	}
+	return providers.RetryPolicy{
+		MaxAttempts: attempts,
+		Backoff:     time.Duration(backoff) * time.Millisecond,
+	}
 }
 
 // CacheTTL returns the response-cache TTL from `cache.ttl_sec`. 0 (or absent)

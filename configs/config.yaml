@@ -43,6 +43,14 @@ cache:
   ttl_sec: 0
   max_entries: 1000
 
+# Upstream retry (all routes). On a TRANSIENT failure — a network error, HTTP 429,
+# or any 5xx — the gateway retries with a linear backoff (backoff_ms * attempt). A
+# 4xx client error is returned immediately (a retry won't fix it). Disabled by
+# default: max_attempts <= 1 means a single try (no retry).
+retry:
+  max_attempts: 1   # total tries incl. the first; set >1 to enable retry
+  backoff_ms: 200   # base backoff; grows linearly per attempt
+
 # Custom sensitive-info detection rules (optional). Each rule's pattern is a Go
 # regexp; matches are tokenized (masked->vault->unmasked) exactly like the
 # built-in rules (email/phone/keys). Invalid regex fails loud at startup.
@@ -72,6 +80,12 @@ engine:
         path: "/chat/completions"
         auth_strategy: "bearer"  # bearer, header, query
         token_env: "AIGIS_OPENAI_API_KEY"  # Environment variable name
+        # token_envs — optional multi-key load balancing: list several env var
+        # names and the gateway round-robins across the keys that resolve to a
+        # non-empty value (env vars that are empty/unset are skipped). When set,
+        # token_envs takes precedence over token_env above. Keys live only in the
+        # environment, never in this file.
+        # token_envs: ["AIGIS_OPENAI_API_KEY_1", "AIGIS_OPENAI_API_KEY_2"]
       transforms:
         - type: "pii"
           # config.email tunes email tokenization:

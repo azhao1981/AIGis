@@ -26,9 +26,11 @@
 
 ### backlog（按需再做）
 - [ ] Bedrock SigV4（AWS V4 签名，见 B 段）
-- [ ] 健康探针 / 上游可用性探测
+- [x] **健康探针 / 上游可用性探测** — `/health` 被动聚合各路由 breaker 状态：任一非 `closed` 即 `status: degraded`，进程存活始终返回 HTTP 200（body 供 LB/readiness 判读），无主动探测 goroutine（零上游副作用）
 - [ ] Prometheus `/metrics` 导出
-- [ ] 多 key 负载均衡 / 上游重试 / Web 管理 UI
+- [x] **上游重试** — 全局 `retry`：瞬时失败（网络错误 / 429 / 5xx）线性退避重试（`backoff_ms * attempt`），4xx 立即返回；`max_attempts<=1` 默认关闭
+- [x] **多 key 负载均衡** — `upstream.token_envs` 多 key 轮询（原子游标按 route ID 持久化，跳过空值 env，回退单 `token_env`）
+- [ ] Web 管理 UI（大件，与"防 PII 发出去"定位偏弱，按需再做）
 
 ## 待澄清 / 观察项
 - [x] 日志 `upstream` 字段改为打印解析后 URL —— 抽 `Upstream.ResolvedBaseURL()` 统一 env: 解析，日志与请求共用同一来源
