@@ -32,6 +32,18 @@ var builtinInjectionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(reveal|print|repeat|show|leak)\s+(me\s+)?(your|the)\s+(system\s+prompt|initial\s+instructions|instructions)`),
 	regexp.MustCompile(`(?i)(pretend|act)\s+(you\s+are|as\s+if|to\s+be)\b.{0,40}(no\s+restrictions|unfiltered|without\s+(any\s+)?(rules|restrictions|guidelines))`),
 	regexp.MustCompile(`(?i)bypass\s+(your|the|all)\s+(restrictions|guidelines|safety|filters?)`),
+	// Chinese equivalents of the same well-known attack phrasings. Kept as
+	// conservative as the English set: each requires an instruction-object noun
+	// (指令/规则/提示…) or a jailbreak-specific construct, so benign chat like
+	// "你现在是几点" does not match.
+	regexp.MustCompile(`忽略(掉)?(之前|以上|上面|先前|前面|所有)的?(所有|全部)?(指令|指示|规则|提示词?|设定|要求)`),
+	regexp.MustCompile(`无视(之前|以上|上面|先前|所有|一切)的?(指令|指示|规则|提示词?|设定|限制)`),
+	regexp.MustCompile(`忘(记|掉)(你)?(之前|以上|上面|所有)的?(指令|指示|规则|设定|内容)`),
+	regexp.MustCompile(`你现在(就)?(是|扮演|进入)(一个|一位|一名)`),
+	regexp.MustCompile(`(假装|扮演|假设)(你是|成|自己是)?[^。\n]{0,30}(不受|没有|无)(任何)?(限制|约束|规则|过滤)`),
+	regexp.MustCompile(`开发者模式`),
+	regexp.MustCompile(`(泄露|输出|打印|显示|重复|复述|告诉我)(一下)?(你的|你收到的)?(系统提示词?|初始指令|系统指令)`),
+	regexp.MustCompile(`绕过(你的|所有|一切|任何)?(限制|安全(机制|措施)?|过滤|审查|规则)`),
 }
 
 // InjectionTransform scans request text for prompt-injection / jailbreak
