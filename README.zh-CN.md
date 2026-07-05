@@ -93,7 +93,44 @@ curl -s http://localhost:8080/v1/chat/completions \
 看不到明文 PII，而客户端仍能得到连贯的回答。
 
 每次触发脱敏的请求都会向 `./logs/audit.jsonl` 追加一行「仅元数据」记录（规则 +
-计数，无明文）。
+计数，无明文）。可在 `/ui`（Masking 面板）或 `GET /admin/audit?limit=50&rule=Email`
+查看。
+
+## 接入 Claude Code
+
+AIGis 同时暴露 Anthropic 原生 `/v1/messages` 端点，Claude Code 这类 agent 只需
+一个环境变量即可走网关——每条 prompt 在离开本机前都会被扫描/脱敏（邮箱、手机号、
+API Key、私钥整块等）：
+
+```bash
+# 1. 把 claude-proxy 路由指向你的 Anthropic 兼容上游
+export AIGIS_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
+export AIGIS_ANTHROPIC_KEY=sk-ant-your-real-key
+./bin/aigis serve
+
+# 2. 让 Claude Code 走网关
+export ANTHROPIC_BASE_URL=http://localhost:8080
+claude
+```
+
+内置的 `claude-proxy` 路由（见 [`configs/config.yaml`](configs/config.yaml)）匹配
+`claude*`/`glm*` 模型，向上游注入 `x-api-key`，并应用 `pii_claude` 脱敏转换。占位
+符在流式响应中还原，agent 正常工作，模型全程看不到明文敏感信息。
+
+## Docker 运行
+
+```bash
+# .env 存放上游 Key（AIGIS_OPENAI_API_KEY=...、AIGIS_ANTHROPIC_KEY=... 等）
+docker compose up -d --build
+
+# 或直接 docker
+docker build -t aigis .
+docker run -d --name aigis -p 8080:8080 --env-file .env -v "$PWD/logs:/app/logs" aigis
+```
+
+镜像以非 root 用户运行，暴露 `:8080`，健康检查走 `/health`，通过卷持久化
+`./logs`（网关日志 + 仅元数据的 `audit.jsonl`）。如需自定义路由，挂载自己的
+`configs/config.yaml`（见 [`docker-compose.yml`](docker-compose.yml) 中的注释行）。
 
 ## 使用方式
 

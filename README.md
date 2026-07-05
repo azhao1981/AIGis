@@ -95,7 +95,48 @@ original values in the reply returned to the client, so the model never sees the
 raw PII but your client still gets a coherent answer.
 
 Every masked request appends one metadata-only line (rule + counts, no
-plaintext) to `./logs/audit.jsonl`.
+plaintext) to `./logs/audit.jsonl`. You can browse it at `/ui` (Masking panel)
+or via `GET /admin/audit?limit=50&rule=Email`.
+
+## Use with Claude Code
+
+AIGis also exposes the Anthropic-native `/v1/messages` endpoint, so agents like
+Claude Code can go through the gateway with a single env var — every prompt is
+scanned/masked (emails, phones, API keys, private key blocks, ...) before it
+leaves your machine:
+
+```bash
+# 1. Point the claude-proxy route at your Anthropic-compatible upstream
+export AIGIS_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
+export AIGIS_ANTHROPIC_KEY=sk-ant-your-real-key
+./bin/aigis serve
+
+# 2. Route Claude Code through the gateway
+export ANTHROPIC_BASE_URL=http://localhost:8080
+claude
+```
+
+The bundled `claude-proxy` route (see [`configs/config.yaml`](configs/config.yaml))
+matches `claude*`/`glm*` models, injects `x-api-key` upstream, and applies the
+`pii_claude` masking transform. Placeholders are restored in the streamed
+response, so the agent works normally while the model never sees the raw
+secrets.
+
+## Run with Docker
+
+```bash
+# .env holds the upstream keys (AIGIS_OPENAI_API_KEY=..., AIGIS_ANTHROPIC_KEY=..., ...)
+docker compose up -d --build
+
+# or plain docker
+docker build -t aigis .
+docker run -d --name aigis -p 8080:8080 --env-file .env -v "$PWD/logs:/app/logs" aigis
+```
+
+The image runs as a non-root user, exposes `:8080`, health-checks `/health`,
+and persists `./logs` (gateway log + metadata-only `audit.jsonl`) via the
+volume. Mount your own `configs/config.yaml` to customize routes (see the
+commented line in [`docker-compose.yml`](docker-compose.yml)).
 
 ## Usage
 

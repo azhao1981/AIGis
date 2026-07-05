@@ -1,0 +1,19 @@
+services:
+  aigis:
+    build: .
+    image: aigis:latest
+    ports:
+      - "8080:8080"
+    # Upstream keys are env-only (never in config files). Put them in .env next
+    # to this file, e.g.:
+    #   AIGIS_OPENAI_API_KEY=sk-...
+    #   AIGIS_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
+    #   AIGIS_ANTHROPIC_KEY=sk-ant-...
+    env_file:
+      - .env
+    volumes:
+      # Persist gateway log + metadata-only masking audit trail (audit.jsonl).
+      - ./logs:/app/logs
+      # Uncomment to override the baked-in default config:
+      # - ./configs/config.yaml:/app/configs/config.yaml:ro
+    restart: unless-stopped

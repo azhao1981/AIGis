@@ -1,0 +1,16 @@
+.git
+.github
+.claude
+.codegraph
+.agent-teams
+.vscode
+bin
+logs
+tmp
+docs
+tests
+ee
+cmd/aigis-ee
+.env
+.envrc
+*.md
