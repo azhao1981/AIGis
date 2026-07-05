@@ -2,11 +2,14 @@ package security
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Rule 定义了敏感信息检测规则
@@ -39,10 +42,13 @@ func NewScanner() *Scanner {
 	}
 
 	// 注册内置规则 - 按照优先级顺序（先匹配更具体的模式）
-	// 1. Private Key - 最独特的模式，应该先匹配
+	// 1. Private Key - 最独特的模式，应该先匹配。
+	// 匹配 BEGIN..END 整块（含 base64 密钥体），而非只撕掉头部标签；
+	// END 缺失（截断粘贴）时可选组退化为只匹配头部，保底不放行标记行。
+	// (?:[A-Z]+ )* 覆盖 "PRIVATE KEY" / "RSA PRIVATE KEY" / "ENCRYPTED PRIVATE KEY" 等变体。
 	scanner.rules = append(scanner.rules, Rule{
 		Name:        "Private Key",
-		Pattern:     regexp.MustCompile(`-----BEGIN [A-Z ]+ PRIVATE KEY-----`),
+		Pattern:     regexp.MustCompile(`-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----(?:[\s\S]*?-----END (?:[A-Z]+ )*PRIVATE KEY-----)?`),
 		Replacement: "[PRIVATE_KEY_REDACTED]",
 	})
 
@@ -181,21 +187,71 @@ func (s *Scanner) Sanitize(input string) string {
 // missed is caught before anything leaves the gateway. Empty result = clean.
 // extra holds route-scoped rules (mirrors MaskWithExtraRules) so the check
 // covers the exact same rule set that masking used.
+//
+// It also decodes base64-looking runs and re-runs the same rules on the
+// plaintext (one level, detection-only): a secret smuggled inside base64 would
+// otherwise pass the plain scan untouched. Masking deliberately does NOT
+// rewrite inside encoded blobs (it would break the unmask round-trip), so the
+// encoded channel is covered here, where a hit blocks egress.
 func (s *Scanner) Detect(input string, extra []Rule) []string {
 	var hits []string
-	check := func(rules []Rule) {
+	check := func(text, suffix string, rules []Rule) {
 		for _, rule := range rules {
-			for _, match := range rule.Pattern.FindAllString(input, -1) {
+			for _, match := range rule.Pattern.FindAllString(text, -1) {
 				if rule.valid(match) {
-					hits = append(hits, rule.Name)
+					hits = append(hits, rule.Name+suffix)
 					break
 				}
 			}
 		}
 	}
-	check(s.rules)
-	check(extra)
+	check(input, "", s.rules)
+	check(input, "", extra)
+
+	for _, cand := range base64CandidatePattern.FindAllString(input, -1) {
+		decoded, ok := decodeBase64Loose(cand)
+		if !ok || !mostlyText(decoded) {
+			continue
+		}
+		check(string(decoded), " (base64)", s.rules)
+		check(string(decoded), " (base64)", extra)
+	}
 	return hits
+}
+
+// base64CandidatePattern matches runs that plausibly carry a base64 payload:
+// std or URL-safe alphabet, >= 48 chars (~36 decoded bytes) — long enough to
+// hold a secret, high enough a floor to keep ordinary words/IDs out.
+var base64CandidatePattern = regexp.MustCompile(`[A-Za-z0-9+/_-]{48,}={0,2}`)
+
+// decodeBase64Loose decodes s as base64, tolerating both the standard and
+// URL-safe alphabets and missing padding. Returns ok=false if neither decodes.
+func decodeBase64Loose(s string) ([]byte, bool) {
+	trimmed := strings.TrimRight(s, "=")
+	for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
+		if b, err := enc.DecodeString(trimmed); err == nil {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
+// mostlyText reports whether decoded bytes look like human-readable text
+// (valid UTF-8, >= 90% printable/whitespace runes). Binary blobs — images,
+// compressed data — fail this and are skipped, so vision payloads and random
+// bytes don't trigger the decoded scan.
+func mostlyText(b []byte) bool {
+	if len(b) == 0 || !utf8.Valid(b) {
+		return false
+	}
+	total, printable := 0, 0
+	for _, r := range string(b) {
+		total++
+		if unicode.IsPrint(r) || unicode.IsSpace(r) {
+			printable++
+		}
+	}
+	return printable*10 >= total*9
 }
 
 // generatePlaceholder generates a unique placeholder for a secret using SHA256 hash

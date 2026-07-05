@@ -1,6 +1,7 @@
 package security
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -631,5 +632,132 @@ func TestDetectValidatorRespected(t *testing.T) {
 	}
 	if !found {
 		t.Error("Luhn-valid card should hit Detect as 'Bank Card'")
+	}
+}
+
+// TestSanitizePrivateKeyFullBlock: the whole PEM block (header + base64 body +
+// footer) must be redacted, not just the BEGIN marker line.
+func TestSanitizePrivateKeyFullBlock(t *testing.T) {
+	scanner := NewScanner()
+
+	pem := "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7xKcQ+fake+body+lines\nanotherBase64LineHere==\n-----END RSA PRIVATE KEY-----"
+	out := scanner.Sanitize("here is my key: " + pem + " please help")
+
+	if !strings.Contains(out, "[PRIVATE_KEY_REDACTED]") {
+		t.Fatalf("PEM block not redacted: %s", out)
+	}
+	for _, leak := range []string{"MIIEpAIBAAKCAQEA", "anotherBase64LineHere", "END RSA PRIVATE KEY"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("key material leaked (%q): %s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "please help") {
+		t.Errorf("text after the block must survive: %s", out)
+	}
+}
+
+// TestSanitizePrivateKeyVariantsAndTruncated: PKCS#8 ("PRIVATE KEY"),
+// ENCRYPTED and EC variants are covered, and a truncated paste (no END) still
+// redacts the header line instead of passing it through.
+func TestSanitizePrivateKeyVariantsAndTruncated(t *testing.T) {
+	scanner := NewScanner()
+
+	variants := []string{
+		"-----BEGIN PRIVATE KEY-----\nbodybody==\n-----END PRIVATE KEY-----",
+		"-----BEGIN ENCRYPTED PRIVATE KEY-----\nbodybody==\n-----END ENCRYPTED PRIVATE KEY-----",
+		"-----BEGIN EC PRIVATE KEY-----\nbodybody==\n-----END EC PRIVATE KEY-----",
+	}
+	for _, pem := range variants {
+		out := scanner.Sanitize(pem)
+		if strings.Contains(out, "bodybody") || !strings.Contains(out, "[PRIVATE_KEY_REDACTED]") {
+			t.Errorf("variant not fully redacted: %s -> %s", pem[:30], out)
+		}
+	}
+
+	truncated := scanner.Sanitize("-----BEGIN RSA PRIVATE KEY-----\nleftover")
+	if !strings.Contains(truncated, "[PRIVATE_KEY_REDACTED]") {
+		t.Errorf("truncated header must still be redacted: %s", truncated)
+	}
+}
+
+// TestSanitizePrivateKeyTwoBlocks: lazy matching must keep two adjacent PEM
+// blocks separate instead of swallowing the text between them.
+func TestSanitizePrivateKeyTwoBlocks(t *testing.T) {
+	scanner := NewScanner()
+
+	in := "-----BEGIN PRIVATE KEY-----\naaa\n-----END PRIVATE KEY----- keep me -----BEGIN PRIVATE KEY-----\nbbb\n-----END PRIVATE KEY-----"
+	out := scanner.Sanitize(in)
+
+	if !strings.Contains(out, "keep me") {
+		t.Errorf("text between two blocks must survive lazy match: %s", out)
+	}
+	if strings.Count(out, "[PRIVATE_KEY_REDACTED]") != 2 {
+		t.Errorf("want 2 redactions, got: %s", out)
+	}
+}
+
+// TestDetectBase64Smuggled: a secret hidden inside a base64 blob must be
+// caught by the decoded second-pass scan (std and URL-safe alphabets, with and
+// without padding).
+func TestDetectBase64Smuggled(t *testing.T) {
+	scanner := NewScanner()
+	secret := "my aws key is AKIAIOSFODNN7EXAMPLE thanks a lot friend"
+
+	cases := map[string]string{
+		"std-padded":  base64.StdEncoding.EncodeToString([]byte(secret)),
+		"std-raw":     base64.RawStdEncoding.EncodeToString([]byte(secret)),
+		"url-safe":    base64.RawURLEncoding.EncodeToString([]byte(secret)),
+	}
+	for name, blob := range cases {
+		hits := scanner.Detect("payload: "+blob, nil)
+		found := false
+		for _, h := range hits {
+			if h == "AWS Access Key (base64)" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: smuggled key not detected, hits=%v", name, hits)
+		}
+	}
+}
+
+// TestDetectBase64CleanAndBinary: an innocuous base64 blob and a binary blob
+// must NOT produce hits — no false positives from the decoded pass.
+func TestDetectBase64CleanAndBinary(t *testing.T) {
+	scanner := NewScanner()
+
+	clean := base64.StdEncoding.EncodeToString([]byte("just a plain harmless sentence with nothing secret inside at all"))
+	if hits := scanner.Detect("data: "+clean, nil); len(hits) != 0 {
+		t.Errorf("clean base64 must not hit, got %v", hits)
+	}
+
+	binary := make([]byte, 120)
+	for i := range binary {
+		binary[i] = byte(i*7 + 3)
+	}
+	blob := base64.StdEncoding.EncodeToString(binary)
+	if hits := scanner.Detect("img: "+blob, nil); len(hits) != 0 {
+		t.Errorf("binary base64 must be skipped (mostlyText), got %v", hits)
+	}
+}
+
+// TestDetectBase64ExtraRules: route-scoped extra rules join the decoded pass.
+func TestDetectBase64ExtraRules(t *testing.T) {
+	scanner := NewScanner()
+	extra, err := CompileRules([]CustomRule{{Name: "Order ID", Pattern: "ORD-[0-9]{5}"}})
+	if err != nil {
+		t.Fatalf("CompileRules: %v", err)
+	}
+	blob := base64.StdEncoding.EncodeToString([]byte("the order reference is ORD-12345 please keep this private"))
+	hits := scanner.Detect("x: "+blob, extra)
+	found := false
+	for _, h := range hits {
+		if h == "Order ID (base64)" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("extra rule not applied to decoded content, hits=%v", hits)
 	}
 }
