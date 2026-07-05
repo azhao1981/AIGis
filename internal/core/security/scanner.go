@@ -80,6 +80,53 @@ func NewScanner() *Scanner {
 		Replacement: "[GOOGLE_KEY_REDACTED]",
 	})
 
+	// 5b. Anthropic API Key - sk-ant-* 多段式（含 api03/admin-api/test 等可选
+	// 子前缀）。前缀段长度上限 12（覆盖 "admin-api03" 这种），尾段 base62 >= 90。
+	// 放在 OpenAI 规则之后，前缀不重叠。
+	scanner.rules = append(scanner.rules, Rule{
+		Name:        "Anthropic API Key",
+		Pattern:     regexp.MustCompile(`\bsk-ant-[a-z0-9-]{1,12}-[A-Za-z0-9_-]{90,}\b`),
+		Replacement: "[ANTHROPIC_KEY_REDACTED]",
+	})
+
+	// 5c. Slack token 家族 - xox[bpoas]- 前缀 + 10-72 位 base62，覆盖
+	// bot/user/legacy/app/refresh token 五种。
+	scanner.rules = append(scanner.rules, Rule{
+		Name:        "Slack Token",
+		Pattern:     regexp.MustCompile(`\bxox[bpoas]-[A-Za-z0-9-]{10,72}\b`),
+		Replacement: "[SLACK_TOKEN_REDACTED]",
+	})
+
+	// 5d. Stripe live secret key - sk_live_ + 24+ 位 alphanum，足够独特。
+	scanner.rules = append(scanner.rules, Rule{
+		Name:        "Stripe Key",
+		Pattern:     regexp.MustCompile(`\bsk_live_[A-Za-z0-9]{24,}\b`),
+		Replacement: "[STRIPE_KEY_REDACTED]",
+	})
+
+	// 5e. JWT - 三段 eyJ..eyJ..sig（base64url header.payload），头两段都以
+	// eyJ 开头（base64 编码的 `{"`），第三段任意 base64url；总长 >= 30 过滤短串。
+	// 校验位用 Validator：尝试解码头两段为 JSON，失败则视为 look-alike 放行。
+	scanner.rules = append(scanner.rules, Rule{
+		Name:        "JWT",
+		Pattern:     regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`),
+		Replacement: "[JWT_REDACTED]",
+		Validator:   validJWT,
+	})
+
+	// 5f. 赋值型泄露 - "password=secret"/"api_key: sk-.."/"secret: ..." 等常见
+	// 键值语法。键名白名单（password/passwd/secret/api_key/apikey/access_key/
+	// private_key/token）+ 分隔符 (:= 空白) + 非空白值（>= 8 字符避免短噪音）。
+	// 单引号/双引号/反引号值也吃。Validator 过滤明显占位符（example/your-xxx/foo/bar）
+	// 以及值是已知平台 token 形态的（让具体规则保留处置权，避免双重处理）。
+	// 排在所有 token-prefix 规则之后，使本规则只兜底「裸 key=value」格式。
+	scanner.rules = append(scanner.rules, Rule{
+		Name:        "Credential Assignment",
+		Pattern:     regexp.MustCompile(`(?i)(?:password|passwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|token)\s*[:=]\s*['"` + "`" + `]?[^\s'"` + "`" + `]{8,}`),
+		Replacement: "[CREDENTIAL_REDACTED]",
+		Validator:   validCredential,
+	})
+
 	// 6. Email - 更精确的模式，需要在电话之前匹配
 	scanner.rules = append(scanner.rules, Rule{
 		Name:        "Email",
@@ -163,6 +210,69 @@ func validChinaID(id string) bool {
 		got = 'X'
 	}
 	return got == want
+}
+
+// validJWT reports whether a JWT-looking string actually decodes to JSON in its
+// header and payload segments. JWTs always start with base64url of `{"..."}`
+// (which encodes to `eyJ...`); if either segment fails to decode/parse as a
+// JSON object, treat the match as a look-alike and skip it (cut false positives
+// from base64 blobs that happen to begin with eyJ by chance).
+func validJWT(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, seg := range parts[:2] {
+		dec, err := base64.RawURLEncoding.DecodeString(seg)
+		if err != nil {
+			return false
+		}
+		// Must start with `{` and end with `}` (a JSON object). JWT headers and
+		// payloads are always objects; a string/array/number here means it's
+		// not a real JWT.
+		t := strings.TrimSpace(string(dec))
+		if !strings.HasPrefix(t, "{") || !strings.HasSuffix(t, "}") {
+			return false
+		}
+	}
+	return len(parts[2]) >= 8 // signature short floor to drop toy matches
+}
+
+// validCredential filters out obvious placeholder values for the
+// Credential Assignment rule (examples from docs, dummy configs, etc.). The
+// match is the entire "key=value" run; only the value portion (after the first
+// `:` or `=`) is inspected. Already-redacted placeholders from upstream rules
+// ([XXX_REDACTED]) are also rejected so this rule doesn't double-process what a
+// more specific rule (GitHub/OpenAI/etc.) already tokenized.
+func validCredential(match string) bool {
+	sep := strings.IndexAny(match, ":=")
+	if sep < 0 {
+		return false
+	}
+	val := strings.TrimSpace(match[sep+1:])
+	val = strings.Trim(val, `"'` + "`")
+	if len(val) < 8 {
+		return false
+	}
+	low := strings.ToLower(val)
+	switch {
+	case strings.Contains(low, "example"),
+		strings.Contains(low, "your-"),
+		strings.Contains(low, "your_"),
+		strings.Contains(low, "<"),
+		strings.Contains(low, ">"),
+		strings.Contains(low, "xxxxxx"),
+		low == "changeme",
+		low == "placeholder",
+		low == "todo",
+		low == "redacted":
+		return false
+	}
+	// Reject values that look like an already-applied redaction marker.
+	if strings.HasPrefix(val, "[") && strings.HasSuffix(val, "]") && strings.Contains(low, "redacted") {
+		return false
+	}
+	return true
 }
 
 // Sanitize 清理文本中的所有敏感信息

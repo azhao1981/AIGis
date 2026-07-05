@@ -761,3 +761,93 @@ func TestDetectBase64ExtraRules(t *testing.T) {
 		t.Errorf("extra rule not applied to decoded content, hits=%v", hits)
 	}
 }
+
+// TestSanitizeHighEntropySecrets covers the new high-entropy secret rules:
+// Anthropic key, Slack token, Stripe key, JWT, and credential-assignment leaks.
+func TestSanitizeHighEntropySecrets(t *testing.T) {
+	scanner := NewScanner()
+
+	// Anthropic key: sk-ant-api03-<95+ base62>
+	anth := "sk-ant-api03-" + strings.Repeat("A", 95)
+	got := scanner.Sanitize("key: " + anth)
+	if strings.Contains(got, anth) {
+		t.Errorf("Anthropic key not redacted: %s", got)
+	}
+	if !strings.Contains(got, "[ANTHROPIC_KEY_REDACTED]") {
+		t.Errorf("Anthropic placeholder missing: %s", got)
+	}
+
+	// Slack bot token
+	slack := "xoxb-" + strings.Repeat("a", 48)
+	got = scanner.Sanitize("token " + slack + " end")
+	if strings.Contains(got, slack) || !strings.Contains(got, "[SLACK_TOKEN_REDACTED]") {
+		t.Errorf("Slack token mishandled: %s", got)
+	}
+
+	// Stripe live key
+	stripe := "sk_live_" + strings.Repeat("A", 24)
+	got = scanner.Sanitize("bill " + stripe)
+	if strings.Contains(got, stripe) || !strings.Contains(got, "[STRIPE_KEY_REDACTED]") {
+		t.Errorf("Stripe key mishandled: %s", got)
+	}
+
+	// JWT: build a real one (valid base64url header/payload objects)
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"123","name":"alice"}`))
+	jwt := header + "." + payload + "." + strings.Repeat("c", 32)
+	got = scanner.Sanitize("auth=bearer " + jwt)
+	if strings.Contains(got, jwt) || !strings.Contains(got, "[JWT_REDACTED]") {
+		t.Errorf("JWT mishandled: %s", got)
+	}
+
+	// Credential assignment variants
+	for _, raw := range []string{
+		"password=Sup3rS3cret!",
+		"api_key: abcdefgh1234",
+		`secret = "MyVoiceIsMyPassword123"`,
+		"PRIVATE_KEY=-----BEGIN-----abcd",
+	} {
+		got = scanner.Sanitize("config " + raw + " end")
+		if !strings.Contains(got, "[CREDENTIAL_REDACTED]") {
+			t.Errorf("credential assignment not redacted for %q: %s", raw, got)
+		}
+	}
+}
+
+// TestSanitizeCredentialFalsePositives verifies the credential rule drops
+// obvious placeholders and short values, so docs/configs with example values
+// do NOT get falsely redacted.
+func TestSanitizeCredentialFalsePositives(t *testing.T) {
+	scanner := NewScanner()
+	for _, raw := range []string{
+		"password: <your-password-here>",
+		"api_key: example-key-123",
+		"secret: your_secret_here",
+		"token: xxxx",
+		"password: changeme",
+		"api_key: placeholder",
+	} {
+		got := scanner.Sanitize("cfg " + raw + " end")
+		if strings.Contains(got, "[CREDENTIAL_REDACTED]") {
+			t.Errorf("false positive on placeholder %q: %s", raw, got)
+		}
+	}
+}
+
+// TestSanitizeJWTValidatorRejections verifies the JWT validator drops
+// look-alikes: bad base64 in header, payload that isn't a JSON object, or a
+// too-short signature.
+func TestSanitizeJWTValidatorRejections(t *testing.T) {
+	scanner := NewScanner()
+	for _, raw := range []string{
+		// header segment has a non-base64url char
+		"eyJ!!!!!.eyJzdWIiOiIxIn0.signature123",
+		// payload decodes to a JSON string, not an object
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWJtaXQi.abcdefgh",
+	} {
+		got := scanner.Sanitize("jwt " + raw + " end")
+		if strings.Contains(got, "[JWT_REDACTED]") {
+			t.Errorf("look-alike JWT falsely redacted %q: %s", raw, got)
+		}
+	}
+}
