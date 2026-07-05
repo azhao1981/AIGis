@@ -84,6 +84,17 @@ engine:
           #   Private Key / AWS Access Key / OpenAI API Key / GitHub Token /
           #   Google API Key / Email / Mobile Phone (+ any custom_rules names).
           config: {}  # Uses default patterns (all rules, email: full)
+        # Inbound guards (optional). Both are request-side transforms; a hit
+        # aborts the request BEFORE it reaches the upstream (saves upstream cost).
+        # - type: "guard"        # size / token budget pre-check
+        #   config:
+        #     max_bytes: "262144"  # reject bodies larger than 256 KiB (0/omit = off)
+        #     max_tokens: "4096"   # reject if the request's max_tokens exceeds this
+        # - type: "injection"    # prompt-injection / jailbreak detection
+        #   config:
+        #     mode: "block"        # "block" (default, hit -> 400) or "warn" (log only)
+        #     # extra_patterns — route-scoped extra rules (JSON array of {name,pattern}):
+        #     extra_patterns: '[{"name":"secret-word","pattern":"(?i)open sesame"}]'
     # Gemini route: Gemini models via an OpenAI-compatible aggregator endpoint
     # (e.g. aihubmix / inferera), so request/response stay in OpenAI shape — no
     # protocol translation needed (unlike Dify). Uses AIGIS_GEMINI_BASE_URL (/v1)

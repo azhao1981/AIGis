@@ -336,7 +336,7 @@ func TestUnmaskClaudeFormat(t *testing.T) {
 func TestRegistryGet(t *testing.T) {
 	r := NewDefaultRegistry(security.NewScanner())
 
-	for _, name := range []string{TypePII, TypePIIClaude, TypeFieldMap, TypeTemplate, TypeUnmask} {
+	for _, name := range []string{TypePII, TypePIIClaude, TypeFieldMap, TypeTemplate, TypeUnmask, TypeInjection, TypeGuard} {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("expected %q registered", name)
 		}

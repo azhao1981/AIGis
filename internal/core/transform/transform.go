@@ -19,6 +19,8 @@ const (
 	TypeFieldMap  = "field_map"  // Field mapping using gjson/sjson
 	TypeTemplate  = "template"   // Go text/template transformation
 	TypeUnmask    = "unmask"     // Restore tokenized secrets in a response body
+	TypeInjection = "injection"  // Prompt-injection / jailbreak detection
+	TypeGuard     = "guard"      // Inbound size / token budget pre-check
 )
 
 // Transformer is the algorithm contract for a single transformation step.
@@ -51,6 +53,8 @@ func NewDefaultRegistry(scanner *security.Scanner) *Registry {
 	r.Register(&FieldMapTransform{})
 	r.Register(&TemplateTransform{})
 	r.Register(&UnmaskTransform{scanner: scanner})
+	r.Register(&InjectionTransform{})
+	r.Register(&GuardTransform{})
 	return r
 }
 
@@ -64,6 +68,8 @@ func KnownTypes() map[string]bool {
 		TypeFieldMap:  true,
 		TypeTemplate:  true,
 		TypeUnmask:    true,
+		TypeInjection: true,
+		TypeGuard:     true,
 	}
 }
 
