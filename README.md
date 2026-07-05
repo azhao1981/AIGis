@@ -6,6 +6,8 @@ English | [简体中文](README.zh-CN.md)
 
 AIGis is an AI security gateway written in Go that provides access control and data processing for AI/LLM services.
 
+For a complete overview of what AIGis does, see the [Features](docs/FEATURES.md) doc.
+
 ## Install
 
 ### Download a pre-built binary
