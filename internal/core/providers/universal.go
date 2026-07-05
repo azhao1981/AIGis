@@ -3,6 +3,7 @@ package providers
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,9 +35,16 @@ type RetryPolicy struct {
 // TransformError marks a request rejected by a request-side transform (e.g.
 // injection block, guard budget): the fault is the client's and the upstream
 // was never called, so the gateway maps it to 400 and skips breaker bookkeeping.
-type TransformError struct{ Err error }
+// Transform carries the strategy name ("injection", "guard", "pii", ...) so the
+// handler can attribute the rejection in metrics without parsing error text.
+type TransformError struct {
+	Transform string
+	Err       error
+}
 
-func (e *TransformError) Error() string { return "transform error: " + e.Err.Error() }
+func (e *TransformError) Error() string {
+	return "transform error: " + e.Err.Error()
+}
 func (e *TransformError) Unwrap() error { return e.Err }
 
 // UniversalProvider implements the core.Provider interface with configurable routing
@@ -102,7 +110,7 @@ func (p *UniversalProvider) Send(ctx *core.AIGisContext, body []byte, originalHe
 	// Step 1: Apply request transforms (with bidirectional tokenization)
 	transformedBody, err := p.applyRequestTransforms(ctx, body)
 	if err != nil {
-		return nil, &TransformError{Err: err}
+		return nil, wrapTransformError(err)
 	}
 
 	// Step 1b: Strict-review egress check. On force_block routes, scan the
@@ -135,7 +143,7 @@ func (p *UniversalProvider) SendStream(ctx *core.AIGisContext, body []byte, orig
 	// Step 1: Apply request transforms (with bidirectional tokenization)
 	transformedBody, err := p.applyRequestTransforms(ctx, body)
 	if err != nil {
-		return &TransformError{Err: err}
+		return wrapTransformError(err)
 	}
 
 	// Step 2: Build and send the upstream request, keeping the body stream open
@@ -218,6 +226,8 @@ func (p *UniversalProvider) egressLeakCheck(body []byte) error {
 
 // applyRequestTransforms applies all configured transformations to the request
 // body by dispatching each step to its registered Transformer (Strategy).
+// On failure, the offending transform name is reported via the returned error
+// chain so callers (handler / metrics) can attribute the rejection.
 func (p *UniversalProvider) applyRequestTransforms(ctx *core.AIGisContext, body []byte) ([]byte, error) {
 	result := body
 
@@ -229,11 +239,32 @@ func (p *UniversalProvider) applyRequestTransforms(ctx *core.AIGisContext, body 
 		}
 		var err error
 		if result, err = t.Apply(ctx, result, step.Config); err != nil {
-			return nil, fmt.Errorf("transform %s failed: %w", step.Type, err)
+			return nil, &transformError{transform: step.Type, err: err}
 		}
 	}
 
 	return result, nil
+}
+
+// transformError is the internal, transform-attributed error. Send/SendStream
+// unwrap it into the public TransformError (see Send / SendStream).
+type transformError struct {
+	transform string
+	err       error
+}
+
+func (e *transformError) Error() string { return "transform " + e.transform + " failed: " + e.err.Error() }
+func (e *transformError) Unwrap() error { return e.err }
+
+// wrapTransformError converts the internal transformError into the public
+// TransformError (preserving the strategy name). A non-transform error is
+// returned as-is.
+func wrapTransformError(err error) error {
+	var te *transformError
+	if errors.As(err, &te) {
+		return &TransformError{Transform: te.transform, Err: te.err}
+	}
+	return err
 }
 
 // buildUpstreamHeaders constructs headers for upstream request based on HeaderPolicy
