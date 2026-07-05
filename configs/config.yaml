@@ -21,6 +21,15 @@ log:
 # Clean requests produce no line. Defaults to true if this section is omitted.
 audit:
   enabled: true
+  # 审计文件滚动：默认关闭（单文件，交给 logrotate）。与 log.rotate 同一套约定，
+  # 切勿同时用 logrotate + 内置滚动管同一文件。/admin/audit 只查当前文件，
+  # 滚动出去的历史文件是保留策略，不进查询面。
+  rotate: false
+  # 下列参数仅在 rotate: true 时生效：
+  # max_size_mb: 100   # rotate when the file exceeds this size
+  # max_backups: 7     # keep at most this many rotated files
+  # max_age_days: 30   # delete rotated files older than this
+  # compress: true     # gzip rotated files
 
 # Admission control. max_concurrent caps the number of requests processed at
 # once; excess requests get HTTP 429 (Too Many Requests). 0 = unlimited (default).
@@ -277,6 +286,26 @@ engine:
     #       config:
     #         "prompt": "messages.0.content"  # target: source
     #         "max_tokens": "max_tokens"
+
+    # AWS Bedrock 示例（SigV4 签名，无需 Bearer token）。
+    # - 凭证走 AWS access key + secret key（环境变量）
+    # - region 必填，path 形如 /model/<model-id>/invoke 或 /converse
+    # - 网关用 auth_strategy: bedrock 时自动派发 Authorization / X-Amz-Date /
+    #   X-Amz-Content-SHA256 头，无需在 header_policy 里手填。
+    # - 注意：Bedrock 走自家协议（不是 OpenAI /chat/completions），客户端要
+    #   适配 body 形态；通常配合 field_map / template 转换。
+    # - id: "bedrock-claude"
+    #   matcher:
+    #     model: "^anthropic.claude"
+    #   upstream:
+    #     base_url: "https://bedrock-runtime.us-east-1.amazonaws.com"
+    #     path: "/model/anthropic.claude-3-sonnet-20240229-v1:0/invoke"
+    #     auth_strategy: "bedrock"
+    #     region: "us-east-1"
+    #     access_key_env: "AIGIS_BEDROCK_ACCESS_KEY_ID"
+    #     secret_key_env: "AIGIS_BEDROCK_SECRET_ACCESS_KEY"
+    #   transforms:
+    #     - type: "pii"
 
     # Catch-all route (matches everything, should be last)
     - id: "fallback"

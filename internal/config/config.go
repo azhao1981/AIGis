@@ -10,6 +10,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 
+	"aigis/internal/core/audit"
 	"aigis/internal/core/breaker"
 	"aigis/internal/core/engine"
 	"aigis/internal/core/providers"
@@ -99,6 +100,28 @@ func AuditEnabled() bool {
 		return true
 	}
 	return viper.GetBool("audit.enabled")
+}
+
+// AuditRotation returns the audit-file rotation policy from the `audit`
+// section. Mirrors the application log convention: rotation is opt-in via
+// `audit.rotate: true`; size/backup/age knobs fall back to audit.DefaultRotation
+// when absent or non-positive.
+func AuditRotation() audit.Rotation {
+	rot := audit.DefaultRotation()
+	rot.Enabled = viper.GetBool("audit.rotate")
+	if v := viper.GetInt("audit.max_size_mb"); v > 0 {
+		rot.MaxSizeMB = v
+	}
+	if v := viper.GetInt("audit.max_backups"); v > 0 {
+		rot.MaxBackups = v
+	}
+	if v := viper.GetInt("audit.max_age_days"); v > 0 {
+		rot.MaxAgeDays = v
+	}
+	if viper.IsSet("audit.compress") {
+		rot.Compress = viper.GetBool("audit.compress")
+	}
+	return rot
 }
 
 // BreakerConfig returns the per-route circuit-breaker config from the `breaker`

@@ -9,11 +9,12 @@ import (
 // "none" and "" both mean "no built-in auth" (auth is handled via header_policy,
 // e.g. the claude-proxy route that sets x-api-key, or there is no auth at all).
 var validAuthStrategies = map[string]bool{
-	AuthStrategyBearer: true,
-	AuthStrategyHeader: true,
-	AuthStrategyQuery:  true,
-	"none":             true,
-	"":                 true,
+	AuthStrategyBearer:  true,
+	AuthStrategyHeader:  true,
+	AuthStrategyQuery:   true,
+	AuthStrategyBedrock: true,
+	"none":              true,
+	"":                  true,
 }
 
 // Validate checks the engine configuration for structural errors that would

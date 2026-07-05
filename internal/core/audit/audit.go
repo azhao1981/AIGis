@@ -10,12 +10,14 @@ package audit
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
+	lumberjack "gopkg.in/natefinch/lumberjack.v2"
 
 	"aigis/internal/core"
 )
@@ -46,15 +48,48 @@ type Record struct {
 // Auditor appends Records as JSON lines (JSONL) to a file. Safe for concurrent use.
 type Auditor struct {
 	mu      sync.Mutex
-	f       *os.File
+	w       io.WriteCloser
 	enabled bool
 	log     *zap.Logger // may be nil; guarded at every use
 }
 
-// New opens (or creates) the audit file in append mode. When enabled is false the
-// returned Auditor is a no-op and no file is opened. log records write failures
-// so a silently-broken audit trail is loud (it may be nil).
+// Rotation configures optional size/age-based rotation of the audit file via
+// lumberjack. Like the application log, rotation is OPT-IN: left disabled (the
+// default) the audit trail is a single append-only file, rotation delegated to
+// an external tool such as logrotate — never run both against the same file.
+type Rotation struct {
+	Enabled    bool // use lumberjack rotation; false = single file (logrotate-friendly)
+	MaxSizeMB  int  // rotate after the file exceeds this many megabytes
+	MaxBackups int  // max number of rotated files to retain
+	MaxAgeDays int  // max age in days before a rotated file is deleted
+	Compress   bool // gzip rotated files
+}
+
+// DefaultRotation returns the defaults: rotation DISABLED, with sane lumberjack
+// parameters that apply only once Enabled is set to true.
+func DefaultRotation() Rotation {
+	return Rotation{
+		Enabled:    false,
+		MaxSizeMB:  100,
+		MaxBackups: 7,
+		MaxAgeDays: 30,
+		Compress:   true,
+	}
+}
+
+// New opens (or creates) the audit file in append mode with rotation disabled.
+// When enabled is false the returned Auditor is a no-op and no file is opened.
+// log records write failures so a silently-broken audit trail is loud (it may
+// be nil).
 func New(path string, enabled bool, log *zap.Logger) (*Auditor, error) {
+	return NewWithRotation(path, enabled, Rotation{}, log)
+}
+
+// NewWithRotation is New with an explicit rotation policy. With rot.Enabled the
+// file is capped by size/backups/age via lumberjack (rotated files keep the
+// 0o600 mode of the live file); /admin/audit queries read the CURRENT file only,
+// so rotated-out history is retention, not a query surface.
+func NewWithRotation(path string, enabled bool, rot Rotation, log *zap.Logger) (*Auditor, error) {
 	if !enabled {
 		return &Auditor{enabled: false, log: log}, nil
 	}
@@ -63,12 +98,27 @@ func New(path string, enabled bool, log *zap.Logger) (*Auditor, error) {
 			return nil, fmt.Errorf("audit: failed to create dir %q: %w", dir, err)
 		}
 	}
+	if rot.Enabled {
+		// lumberjack creates new files 0o600 (and preserves the mode on rotation),
+		// matching the owner-only policy of the plain-file path below.
+		return &Auditor{
+			w: &lumberjack.Logger{
+				Filename:   path,
+				MaxSize:    rot.MaxSizeMB,
+				MaxBackups: rot.MaxBackups,
+				MaxAge:     rot.MaxAgeDays,
+				Compress:   rot.Compress,
+			},
+			enabled: true,
+			log:     log,
+		}, nil
+	}
 	// 0o600: the audit file holds secret previews + fingerprints, so keep it owner-only.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("audit: failed to open %q: %w", path, err)
 	}
-	return &Auditor{f: f, enabled: true, log: log}, nil
+	return &Auditor{w: f, enabled: true, log: log}, nil
 }
 
 // Enabled reports whether the auditor is actually writing records.
@@ -129,7 +179,7 @@ func (a *Auditor) Record(ctx *core.AIGisContext) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if _, err := a.f.Write(append(line, '\n')); err != nil {
+	if _, err := a.w.Write(append(line, '\n')); err != nil {
 		// A broken audit trail (disk full, perms, device error) must be loud.
 		if a.log != nil {
 			a.log.Error("audit: write failed", zap.String("request_id", ctx.RequestID), zap.Error(err))
@@ -139,8 +189,8 @@ func (a *Auditor) Record(ctx *core.AIGisContext) {
 
 // Close closes the underlying file. Safe to call on a disabled/nil Auditor.
 func (a *Auditor) Close() error {
-	if a == nil || !a.enabled || a.f == nil {
+	if a == nil || !a.enabled || a.w == nil {
 		return nil
 	}
-	return a.f.Close()
+	return a.w.Close()
 }

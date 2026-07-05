@@ -64,6 +64,15 @@ type Upstream struct {
 	TokenEnvs []string `mapstructure:"token_envs"`
 	// HeaderName is the header name for "header" auth strategy (default: "Authorization")
 	HeaderName string `mapstructure:"header_name"`
+	// Region is the AWS region for the "bedrock" auth_strategy (SigV4 signing).
+	// Example: "us-east-1". Required when AuthStrategy == "bedrock".
+	Region string `mapstructure:"region"`
+	// AccessKeyEnv is the env var name holding the AWS access key id, used by
+	// the "bedrock" SigV4 auth strategy.
+	AccessKeyEnv string `mapstructure:"access_key_env"`
+	// SecretKeyEnv is the env var name holding the AWS secret access key, used
+	// by the "bedrock" SigV4 auth strategy.
+	SecretKeyEnv string `mapstructure:"secret_key_env"`
 }
 
 // ResolvedBaseURL returns BaseURL with the "env:VAR" syntax resolved to the
@@ -87,9 +96,10 @@ type TransformStep struct {
 
 // AuthStrategy constants
 const (
-	AuthStrategyBearer = "bearer" // Authorization: Bearer <token>
-	AuthStrategyHeader = "header" // Custom header with token value
-	AuthStrategyQuery  = "query"  // Query parameter with token value
+	AuthStrategyBearer  = "bearer"  // Authorization: Bearer <token>
+	AuthStrategyHeader  = "header"  // Custom header with token value
+	AuthStrategyQuery   = "query"   // Query parameter with token value
+	AuthStrategyBedrock = "bedrock" // AWS SigV4 (Bedrock): Authorization + x-amz-date
 )
 
 // TransformType constants are owned by the transform package alongside their

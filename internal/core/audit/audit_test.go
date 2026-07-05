@@ -130,7 +130,7 @@ func TestRecord_WriteFailureIsLoud(t *testing.T) {
 	}
 
 	// Force a write failure: close the underlying file out from under Record.
-	if err := a.f.Close(); err != nil {
+	if err := a.w.Close(); err != nil {
 		t.Fatalf("close fd: %v", err)
 	}
 
@@ -159,5 +159,57 @@ func TestRecord_DisabledIsNoop(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("disabled auditor must not create file, stat err = %v", err)
+	}
+}
+
+// TestNewWithRotation_RotatesBySize verifies the lumberjack-backed auditor
+// rotates the live file once it exceeds MaxSizeMB, keeps writing to the fresh
+// current file (so /admin/audit queries stay valid), and never loses records.
+func TestNewWithRotation_RotatesBySize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	a, err := NewWithRotation(path, true, Rotation{Enabled: true, MaxSizeMB: 1, MaxBackups: 2}, nil)
+	if err != nil {
+		t.Fatalf("NewWithRotation: %v", err)
+	}
+
+	// Each record is ~1KB of preview padding; ~1100 of them crosses 1MB.
+	bigPreview := strings.Repeat("x", 1024)
+	for i := 0; i < 1100; i++ {
+		a.Record(newCtxWithDetections("req", [][3]string{{"Email", "__AIGIS_SEC_aaaaaaaaaaaa__", bigPreview}}))
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The live file must exist and be under the cap (rotation happened).
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat live file: %v", err)
+	}
+	if st.Size() > 1<<20+4096 {
+		t.Errorf("live file not rotated: %d bytes", st.Size())
+	}
+
+	// At least one rotated backup exists alongside.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) < 2 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected live + rotated file(s), got %v", names)
+	}
+
+	// The current file remains valid JSONL for Query.
+	recs, err := Query(path, QueryOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("Query after rotation: %v", err)
+	}
+	if len(recs) == 0 {
+		t.Error("Query returned no records from the post-rotation live file")
 	}
 }

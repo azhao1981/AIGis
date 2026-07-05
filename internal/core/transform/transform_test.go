@@ -176,6 +176,99 @@ func TestPIITransformClaude(t *testing.T) {
 	}
 }
 
+func TestPIITransformOpenAIToolCalls(t *testing.T) {
+	scanner := security.NewScanner()
+	tr := &PIITransform{name: TypePII, format: formatOpenAI, scanner: scanner}
+	ctx := newCtx()
+
+	// Assistant tool-call message: content is null, secret sits inside the
+	// function.arguments JSON string. Both must be handled.
+	body := `{"messages":[` +
+		`{"role":"user","content":"call the mail tool"},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"send_mail","arguments":"{\"to\":\"alice@example.com\",\"count\":3}"}}]},` +
+		`{"role":"tool","tool_call_id":"c1","content":"sent to alice@example.com"}` +
+		`]}`
+	out, err := tr.Apply(ctx, []byte(body), nil)
+	if err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	got := string(out)
+	if strings.Contains(got, "alice@example.com") {
+		t.Errorf("email in tool_calls arguments / tool content not redacted: %s", got)
+	}
+	if !placeholderRe.MatchString(got) {
+		t.Errorf("expected placeholder in output: %s", got)
+	}
+
+	// arguments must remain a valid JSON string containing valid JSON.
+	args := gjson.GetBytes(out, "messages.1.tool_calls.0.function.arguments")
+	if !args.Exists() {
+		t.Fatalf("tool_calls arguments missing: %s", got)
+	}
+	if !gjson.Valid(args.String()) {
+		t.Errorf("masked arguments no longer valid JSON: %s", args.String())
+	}
+	if gjson.Get(args.String(), "count").Int() != 3 {
+		t.Errorf("non-secret field corrupted: %s", args.String())
+	}
+	// content: null must survive untouched.
+	if v := gjson.GetBytes(out, "messages.1.content"); v.Type != gjson.Null {
+		t.Errorf("assistant null content changed: %v", v)
+	}
+
+	// Round trip: unmask must restore the original secret.
+	restored := scanner.Unmask(ctx, got)
+	if !strings.Contains(restored, "alice@example.com") {
+		t.Errorf("unmask did not restore secret: %s", restored)
+	}
+}
+
+func TestPIITransformClaudeToolBlocks(t *testing.T) {
+	scanner := security.NewScanner()
+	tr := &PIITransform{name: TypePIIClaude, format: formatClaude, scanner: scanner}
+	ctx := newCtx()
+
+	// tool_use.input is a real JSON object (string leaves masked, numbers kept);
+	// tool_result content covers both string and nested-block-array forms.
+	body := `{"messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"send_mail","input":{"to":"alice@example.com","retries":2}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"delivered to bob@example.com"}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"phone 13800138000"}]}]}` +
+		`]}`
+	out, err := tr.Apply(ctx, []byte(body), nil)
+	if err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	got := string(out)
+	for _, secret := range []string{"alice@example.com", "bob@example.com", "13800138000"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("%q not redacted: %s", secret, got)
+		}
+	}
+
+	// tool_use.input must stay a structured object with non-string leaves intact.
+	input := gjson.GetBytes(out, "messages.0.content.0.input")
+	if !input.IsObject() {
+		t.Fatalf("tool_use input no longer an object: %s", got)
+	}
+	if input.Get("retries").Int() != 2 {
+		t.Errorf("non-string leaf corrupted: %s", input.Raw)
+	}
+	if !placeholderRe.MatchString(input.Get("to").String()) {
+		t.Errorf("input.to should hold a placeholder: %s", input.Raw)
+	}
+
+	// Round trip restores all three secrets.
+	restored := scanner.Unmask(ctx, got)
+	for _, secret := range []string{"alice@example.com", "bob@example.com", "13800138000"} {
+		if !strings.Contains(restored, secret) {
+			t.Errorf("unmask did not restore %q: %s", secret, restored)
+		}
+	}
+}
+
 func TestFieldMapTransform(t *testing.T) {
 	tr := &FieldMapTransform{}
 	body := `{"messages":[{"role":"user","content":"hello"}],"max_tokens":42}`

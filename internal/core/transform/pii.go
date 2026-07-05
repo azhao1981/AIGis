@@ -81,8 +81,15 @@ func parseTags(s string) []string {
 	return tags
 }
 
-// applyOpenAI redacts messages[].content string fields (OpenAI chat format).
+// applyOpenAI redacts messages[].content string fields plus
+// messages[].tool_calls[].function.arguments (OpenAI chat format). Tool-call
+// arguments are conversation history echoed back to the upstream on every
+// turn, so secrets inside them are an egress channel just like content.
 func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, tags []string, opts security.MaskOptions, extra []security.Rule) ([]byte, error) {
+	redact := func(s string) string {
+		return t.scanner.MaskWithExtraRules(ctx, s, tags, opts, extra)
+	}
+
 	root, err := sonic.Get(body)
 	if err != nil {
 		return body, nil // Return original if parse fails
@@ -103,30 +110,69 @@ func (t *PIITransform) applyOpenAI(ctx *core.AIGisContext, body []byte, tags []s
 			break
 		}
 
+		// content: plain string (user/system/tool-result messages). Assistant
+		// tool-call messages often carry content: null — fall through to
+		// tool_calls below instead of skipping the message.
 		contentNode := msgNode.Get("content")
-		if err := contentNode.Check(); err != nil {
-			i++
-			continue
-		}
-		if contentNode.TypeSafe() != ast.V_STRING {
-			i++
-			continue
-		}
-
-		contentStr, err := contentNode.String()
-		if err != nil {
-			i++
-			continue
+		if contentNode.Check() == nil && contentNode.TypeSafe() == ast.V_STRING {
+			if contentStr, err := contentNode.String(); err == nil {
+				if newContent := redact(contentStr); newContent != contentStr {
+					msgNode.Set("content", ast.NewString(newContent))
+				}
+			}
 		}
 
-		newContent := t.scanner.MaskWithExtraRules(ctx, contentStr, tags, opts, extra)
-		if newContent != contentStr {
-			msgNode.Set("content", ast.NewString(newContent))
+		// tool_calls[].function.arguments: a JSON document as a string. Masked
+		// as text — placeholders are quote-free so string values stay intact.
+		toolCallsNode := msgNode.Get("tool_calls")
+		if toolCallsNode.Check() == nil && toolCallsNode.TypeSafe() == ast.V_ARRAY {
+			j := 0
+			for {
+				tcNode := toolCallsNode.Index(j)
+				if err := tcNode.Check(); err != nil {
+					break
+				}
+				fnNode := tcNode.Get("function")
+				if fnNode.Check() == nil {
+					argsNode := fnNode.Get("arguments")
+					if argsNode.Check() == nil && argsNode.TypeSafe() == ast.V_STRING {
+						if argsStr, err := argsNode.String(); err == nil {
+							if newArgs := redact(argsStr); newArgs != argsStr {
+								fnNode.Set("arguments", ast.NewString(newArgs))
+							}
+						}
+					}
+				}
+				j++
+			}
 		}
 		i++
 	}
 
 	return root.MarshalJSON()
+}
+
+// maskJSONStrings recursively applies redact to every string leaf of a decoded
+// JSON value, preserving structure. Used for tool_use.input objects, where
+// masking the raw JSON text could corrupt it (e.g. a phone-number rule matching
+// an unquoted JSON number); masking only string leaves keeps the JSON valid.
+func maskJSONStrings(redact func(string) string, v interface{}) interface{} {
+	switch x := v.(type) {
+	case string:
+		return redact(x)
+	case map[string]interface{}:
+		for k, val := range x {
+			x[k] = maskJSONStrings(redact, val)
+		}
+		return x
+	case []interface{}:
+		for i, val := range x {
+			x[i] = maskJSONStrings(redact, val)
+		}
+		return x
+	default:
+		return v
+	}
 }
 
 // applyClaude redacts the top-level "system" string and messages[].content,
@@ -183,26 +229,16 @@ func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte, tags []s
 				}
 			}
 		} else if contentNode.TypeSafe() == ast.V_ARRAY {
-			// Array of typed blocks (Claude format): redact text blocks
+			// Array of typed blocks (Claude format): redact text, tool_use
+			// (agent-generated arguments), and tool_result (tool output echoed
+			// back) blocks — all three carry request-history text upstream.
 			blockIdx := 0
 			for {
 				blockNode := contentNode.Index(blockIdx)
 				if err := blockNode.Check(); err != nil {
 					break
 				}
-
-				typeNode := blockNode.Get("type")
-				textNode := blockNode.Get("text")
-				if typeNode.Check() == nil && textNode.Check() == nil {
-					typeStr, typeErr := typeNode.String()
-					textStr, textErr := textNode.String()
-					if typeErr == nil && textErr == nil && typeStr == "text" {
-						redactedText := redact(textStr)
-						if redactedText != textStr {
-							blockNode.Set("text", ast.NewString(redactedText))
-						}
-					}
-				}
+				t.redactClaudeBlock(blockNode, redact)
 				blockIdx++
 			}
 		}
@@ -210,4 +246,75 @@ func (t *PIITransform) applyClaude(ctx *core.AIGisContext, body []byte, tags []s
 	}
 
 	return root.MarshalJSON()
+}
+
+// redactClaudeBlock redacts one typed content block in place:
+//   - "text":        the text field
+//   - "tool_use":    every string leaf of the input object (structure kept)
+//   - "tool_result": string content, or the text blocks of array content
+func (t *PIITransform) redactClaudeBlock(blockNode *ast.Node, redact func(string) string) {
+	typeNode := blockNode.Get("type")
+	if typeNode.Check() != nil {
+		return
+	}
+	typeStr, err := typeNode.String()
+	if err != nil {
+		return
+	}
+
+	switch typeStr {
+	case "text":
+		textNode := blockNode.Get("text")
+		if textNode.Check() == nil {
+			if textStr, err := textNode.String(); err == nil {
+				if redacted := redact(textStr); redacted != textStr {
+					blockNode.Set("text", ast.NewString(redacted))
+				}
+			}
+		}
+
+	case "tool_use":
+		inputNode := blockNode.Get("input")
+		if inputNode.Check() != nil {
+			return
+		}
+		raw, err := inputNode.Raw()
+		if err != nil {
+			return
+		}
+		var v interface{}
+		if sonic.Unmarshal([]byte(raw), &v) != nil {
+			return
+		}
+		masked, err := sonic.Marshal(maskJSONStrings(redact, v))
+		if err != nil {
+			return
+		}
+		if _, err := blockNode.Set("input", ast.NewRaw(string(masked))); err != nil {
+			return
+		}
+
+	case "tool_result":
+		contentNode := blockNode.Get("content")
+		if contentNode.Check() != nil {
+			return
+		}
+		if contentNode.TypeSafe() == ast.V_STRING {
+			if s, err := contentNode.String(); err == nil {
+				if redacted := redact(s); redacted != s {
+					blockNode.Set("content", ast.NewString(redacted))
+				}
+			}
+		} else if contentNode.TypeSafe() == ast.V_ARRAY {
+			k := 0
+			for {
+				inner := contentNode.Index(k)
+				if err := inner.Check(); err != nil {
+					break
+				}
+				t.redactClaudeBlock(inner, redact)
+				k++
+			}
+		}
+	}
 }

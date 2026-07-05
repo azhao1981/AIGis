@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -363,6 +364,34 @@ func (p *UniversalProvider) buildAuthHeaders() http.Header {
 	return headers
 }
 
+// buildBedrockAuthHeaders signs the request with AWS SigV4 for the Bedrock
+// auth strategy. It reads the access key id and secret access key from the
+// route's configured env vars; if either is missing it fails loud — an empty
+// SigV4 signature would still be a structurally valid header that Bedrock
+// rejects with 403, surfacing the misconfiguration only at request time.
+func (p *UniversalProvider) buildBedrockAuthHeaders(rawURL string, body []byte) (http.Header, error) {
+	upstream := p.route.Upstream
+	if upstream.Region == "" {
+		return nil, fmt.Errorf("route %q: bedrock auth_strategy requires a region", p.route.ID)
+	}
+	if upstream.AccessKeyEnv == "" || upstream.SecretKeyEnv == "" {
+		return nil, fmt.Errorf("route %q: bedrock auth_strategy requires access_key_env and secret_key_env", p.route.ID)
+	}
+	accessKey := os.Getenv(upstream.AccessKeyEnv)
+	secretKey := os.Getenv(upstream.SecretKeyEnv)
+	if accessKey == "" || secretKey == "" {
+		return nil, fmt.Errorf("route %q: bedrock credentials missing (env vars: %s / %s)",
+			p.route.ID, upstream.AccessKeyEnv, upstream.SecretKeyEnv)
+	}
+
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("route %q: failed to parse upstream URL for SigV4: %w", p.route.ID, err)
+	}
+
+	return signBedrockSigV4(http.MethodPost, parsedURL, body, accessKey, secretKey, upstream.Region, time.Now())
+}
+
 // applyResponseTransforms reshapes the (non-streaming) response body: first any
 // route-configured response transforms (e.g. Dify -> OpenAI shape via template),
 // then unmask to restore tokenized secrets last.
@@ -426,7 +455,18 @@ func (p *UniversalProvider) buildUpstreamRequest(ctx context.Context, body []byt
 	}
 
 	// Build auth headers
-	authHeaders := p.buildAuthHeaders()
+	var authHeaders http.Header
+	if upstream.AuthStrategy == engine.AuthStrategyBedrock {
+		// SigV4 needs the full request line (method + URL + body) to sign, so it
+		// can't go through the token-only buildAuthHeaders path.
+		h, err := p.buildBedrockAuthHeaders(url, body)
+		if err != nil {
+			return nil, err
+		}
+		authHeaders = h
+	} else {
+		authHeaders = p.buildAuthHeaders()
+	}
 
 	// Build all upstream headers using HeaderPolicy
 	upstreamHeaders := p.buildUpstreamHeaders(originalHeaders, authHeaders)

@@ -116,12 +116,14 @@ func NewHTTPServer(addr string, zapLogger *zap.Logger) (*HTTPServer, error) {
 
 	// Audit logger for masked sensitive info (JSONL; previews are partially masked).
 	auditEnabled := config.AuditEnabled()
-	auditor, err := audit.New(auditLogPath, auditEnabled, zapLogger)
+	auditRot := config.AuditRotation()
+	auditor, err := audit.NewWithRotation(auditLogPath, auditEnabled, auditRot, zapLogger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create auditor: %w", err)
 	}
 	extLogger.Info("Audit logger initialized",
 		zap.Bool("enabled", auditEnabled),
+		zap.Bool("rotate", auditRot.Enabled),
 		zap.String("path", auditLogPath),
 	)
 
