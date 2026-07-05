@@ -24,11 +24,11 @@ type Metrics struct {
 	failed    int64
 	startUnix int64
 
-	mu          sync.Mutex
-	routeReqs   map[string]int64 // route_id -> total requests
-	routeFailed map[string]int64 // route_id -> failed requests
-	piiHits     map[string]int64 // rule name -> times masked
-	injBlocks   int64            // requests rejected by injection transform
+	mu               sync.Mutex
+	routeReqs        map[string]int64 // route_id -> total requests
+	routeFailed      map[string]int64 // route_id -> failed requests
+	piiHits          map[string]int64 // rule name -> times masked
+	injBlocks        int64            // requests rejected by injection transform
 	transformRejects map[string]int64 // transform type -> client-rejected count (injection/guard/pii)
 
 	// Latency histogram (coarse, fixed buckets in milliseconds).
@@ -41,13 +41,13 @@ type Metrics struct {
 // New returns a Metrics with the uptime clock started.
 func New() *Metrics {
 	return &Metrics{
-		startUnix:    time.Now().Unix(),
-		routeReqs:    make(map[string]int64),
-		routeFailed:  make(map[string]int64),
-		piiHits:      make(map[string]int64),
+		startUnix:        time.Now().Unix(),
+		routeReqs:        make(map[string]int64),
+		routeFailed:      make(map[string]int64),
+		piiHits:          make(map[string]int64),
 		transformRejects: make(map[string]int64),
-		histBuckets: []float64{10, 50, 100, 250, 500, 1000, 2500, 5000, 10000},
-		histCounts:  make([]int64, 10), // 9 finite buckets + 1 +Inf
+		histBuckets:      []float64{10, 50, 100, 250, 500, 1000, 2500, 5000, 10000},
+		histCounts:       make([]int64, 10), // 9 finite buckets + 1 +Inf
 	}
 }
 
@@ -166,16 +166,16 @@ func (m *Metrics) Snapshot() Snapshot {
 // DimensionSnapshot is the per-route / per-rule view for Prometheus output.
 // Maps are returned as sorted key/count slices for deterministic exposition.
 type DimensionSnapshot struct {
-	RouteRequests     map[string]int64
-	RouteFailed       map[string]int64
-	PIIHits           map[string]int64
-	InjectionBlocked  int64
-	TransformRejects  map[string]int64
-	HistBuckets       []float64 // upper bounds (ms)
-	HistCounts        []int64   // cumulative count at each bucket upper bound
-	HistInfCount      int64     // observations in the +Inf bucket
-	HistSumMs         float64
-	HistCount         int64
+	RouteRequests    map[string]int64
+	RouteFailed      map[string]int64
+	PIIHits          map[string]int64
+	InjectionBlocked int64
+	TransformRejects map[string]int64
+	HistBuckets      []float64 // upper bounds (ms)
+	HistCounts       []int64   // cumulative count at each bucket upper bound
+	HistInfCount     int64     // observations in the +Inf bucket
+	HistSumMs        float64
+	HistCount        int64
 }
 
 // Dimensions returns a copy of the dimension counters (sorted maps). The

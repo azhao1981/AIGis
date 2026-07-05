@@ -89,10 +89,10 @@ func (e *Engine) FindRoute(body []byte) (*Route, error) {
 	return nil, nil // No matching route found
 }
 
-// GetConfig returns a pointer to the engine's current configuration. The
-// pointer is stable across reloads (Reload swaps the Engine's internal state,
-// not the EngineConfig struct a caller holds here); reload-aware consumers
-// should call GetConfig again after a reload rather than caching the result.
+// GetConfig returns a pointer to the engine's current configuration snapshot.
+// Reload replaces this pointer with a new EngineConfig, so a caller-held
+// pointer keeps referencing the (immutable) pre-reload snapshot; reload-aware
+// consumers must call GetConfig again after a reload rather than caching it.
 func (e *Engine) GetConfig() *EngineConfig {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

@@ -253,7 +253,9 @@ type transformError struct {
 	err       error
 }
 
-func (e *transformError) Error() string { return "transform " + e.transform + " failed: " + e.err.Error() }
+func (e *transformError) Error() string {
+	return "transform " + e.transform + " failed: " + e.err.Error()
+}
 func (e *transformError) Unwrap() error { return e.err }
 
 // wrapTransformError converts the internal transformError into the public

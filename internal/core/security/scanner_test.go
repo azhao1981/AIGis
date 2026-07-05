@@ -704,9 +704,9 @@ func TestDetectBase64Smuggled(t *testing.T) {
 	secret := "my aws key is AKIAIOSFODNN7EXAMPLE thanks a lot friend"
 
 	cases := map[string]string{
-		"std-padded":  base64.StdEncoding.EncodeToString([]byte(secret)),
-		"std-raw":     base64.RawStdEncoding.EncodeToString([]byte(secret)),
-		"url-safe":    base64.RawURLEncoding.EncodeToString([]byte(secret)),
+		"std-padded": base64.StdEncoding.EncodeToString([]byte(secret)),
+		"std-raw":    base64.RawStdEncoding.EncodeToString([]byte(secret)),
+		"url-safe":   base64.RawURLEncoding.EncodeToString([]byte(secret)),
 	}
 	for name, blob := range cases {
 		hits := scanner.Detect("payload: "+blob, nil)
@@ -831,6 +831,30 @@ func TestSanitizeCredentialFalsePositives(t *testing.T) {
 		if strings.Contains(got, "[CREDENTIAL_REDACTED]") {
 			t.Errorf("false positive on placeholder %q: %s", raw, got)
 		}
+	}
+}
+
+// TestMaskCredentialAssignmentUnmaskRoundTrip verifies that when a more
+// specific rule (OpenAI) tokenizes the value of a key=value pair first, the
+// Credential Assignment rule does NOT re-tokenize the vault placeholder —
+// otherwise the single-pass Unmask would return the inner placeholder to the
+// client instead of the original secret.
+func TestMaskCredentialAssignmentUnmaskRoundTrip(t *testing.T) {
+	scanner := NewScanner()
+	ctx := &MockVaultContext{}
+	input := "config: api_key=sk-realsecretkey1234567890 done"
+
+	masked := scanner.Mask(ctx, input, nil)
+	if strings.Contains(masked, "sk-realsecretkey") {
+		t.Fatalf("secret survived masking: %s", masked)
+	}
+	if strings.Count(masked, "__AIGIS_SEC_") != 1 {
+		t.Fatalf("expected exactly one placeholder (no nesting), got: %s", masked)
+	}
+
+	restored := scanner.Unmask(ctx, masked)
+	if restored != input {
+		t.Errorf("round trip broken:\n got: %s\nwant: %s", restored, input)
 	}
 }
 

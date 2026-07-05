@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -450,6 +452,80 @@ func TestReloadConfig_HotSwapsRoutes(t *testing.T) {
 	resp.Body.Close()
 	if !called.Load() {
 		t.Error("post-reload: newmodel-* did not reach upstream")
+	}
+}
+
+// TestReloadConfig_RereadsFileFromDisk verifies the full SIGHUP path: editing
+// the config FILE on disk (not viper's in-memory overrides) and calling
+// ReloadConfig must pick up the new routes. Guards against the reload silently
+// serving the startup-time viper snapshot.
+func TestReloadConfig_RereadsFileFromDisk(t *testing.T) {
+	var called atomic.Bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+
+	routesYAML := func(pattern string) string {
+		return `engine:
+  routes:
+    - id: file-route
+      matcher:
+        model: "` + pattern + `"
+      upstream:
+        base_url: "` + up.URL + `"
+        path: "/v1/chat/completions"
+        auth_strategy: "none"
+    - id: fallback
+      matcher: {}
+      upstream:
+        base_url: "` + up.URL + `"
+        path: "/v1/chat/completions"
+        auth_strategy: "none"
+`
+	}
+
+	// Start from a clean viper: earlier tests leave `engine.routes` overrides
+	// behind (viper.Set), and the override layer would mask the file layer this
+	// test exercises. Reset again on cleanup so we leave no file binding around.
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(routesYAML("^filemodel-.*")), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	viper.SetConfigFile(cfgPath)
+	if err := viper.ReadInConfig(); err != nil {
+		t.Fatalf("initial ReadInConfig: %v", err)
+	}
+
+	zapLog, _ := logger.New("error")
+	srv, err := server.NewHTTPServer(":0", zapLog)
+	if err != nil {
+		t.Fatalf("NewHTTPServer: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Edit the FILE (viper's in-memory state still holds the old routes).
+	if err := os.WriteFile(cfgPath, []byte(routesYAML("^diskmodel-.*")), 0o644); err != nil {
+		t.Fatalf("rewrite config: %v", err)
+	}
+	if err := srv.ReloadConfig(); err != nil {
+		t.Fatalf("ReloadConfig: %v", err)
+	}
+
+	called.Store(false)
+	resp, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"diskmodel-x","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("POST post-reload: %v", err)
+	}
+	resp.Body.Close()
+	if !called.Load() {
+		t.Error("post-reload: route edited on disk did not take effect (reload not re-reading file)")
 	}
 }
 

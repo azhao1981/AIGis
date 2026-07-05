@@ -8,11 +8,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 
 	eeadminui "aigis/ee/adminui"
 	"aigis/ee/auth"
@@ -306,6 +309,22 @@ var serveCmd = &cobra.Command{
 			usageSink = eequota.NewTokenMeteringSink(usageSink, tokenGate)
 		}
 		srv.SetUsageSink(usageSink)
+
+		// Hot reload on SIGHUP (same as the OSS binary): re-reads engine.routes +
+		// security.custom_rules from disk and atomically swaps them in (fail loud:
+		// bad config leaves the running state untouched). EE-layer knobs
+		// (auth/quota/billing) still need a restart.
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGHUP)
+		go func() {
+			for range sigCh {
+				if err := srv.ReloadConfig(); err != nil {
+					globalLogger.Error("SIGHUP reload failed (live config unchanged)",
+						zap.Error(err),
+					)
+				}
+			}
+		}()
 
 		return srv.Start()
 	},

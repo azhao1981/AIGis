@@ -224,6 +224,9 @@ func (s *HTTPServer) currentScanner() *security.Scanner {
 // engine section) the live config is left UNTOUCHED and the error returned, so
 // a malformed edit can never break a running gateway.
 func (s *HTTPServer) ReloadConfig() error {
+	if err := config.Reread(); err != nil {
+		return fmt.Errorf("reload: %w", err)
+	}
 	newEngineCfg, err := config.LoadEngineConfig()
 	if err != nil {
 		return fmt.Errorf("reload: failed to load engine config: %w", err)

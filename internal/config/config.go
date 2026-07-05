@@ -78,6 +78,20 @@ func Init(cfgFile string) {
 	}
 }
 
+// Reread re-reads the config file from disk into viper, picking up edits made
+// since startup (used by the SIGHUP hot-reload path). An absent config file is
+// not an error — env-only setups are legal, same as Init; parse errors are
+// returned so the caller can fail loud without touching the live state.
+func Reread() error {
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			return nil
+		}
+		return fmt.Errorf("failed to re-read config file: %w", err)
+	}
+	return nil
+}
+
 // AuditEnabled reports whether sensitive-info audit logging is on.
 // Defaults to true when the `audit.enabled` key is absent from config.
 func AuditEnabled() bool {

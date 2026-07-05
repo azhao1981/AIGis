@@ -250,7 +250,7 @@ func validCredential(match string) bool {
 		return false
 	}
 	val := strings.TrimSpace(match[sep+1:])
-	val = strings.Trim(val, `"'` + "`")
+	val = strings.Trim(val, `"'`+"`")
 	if len(val) < 8 {
 		return false
 	}
@@ -270,6 +270,12 @@ func validCredential(match string) bool {
 	}
 	// Reject values that look like an already-applied redaction marker.
 	if strings.HasPrefix(val, "[") && strings.HasSuffix(val, "]") && strings.Contains(low, "redacted") {
+		return false
+	}
+	// Reject vault placeholders from an earlier Mask rule: re-tokenizing them
+	// would nest placeholders and break the single-pass Unmask round-trip
+	// (the client would get back the inner placeholder, not the secret).
+	if strings.Contains(val, "__AIGIS_SEC_") {
 		return false
 	}
 	return true

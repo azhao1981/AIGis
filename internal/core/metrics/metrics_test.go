@@ -117,9 +117,9 @@ func TestDimensions_RouteAndPII(t *testing.T) {
 func TestDimensions_LatencyHistogram(t *testing.T) {
 	m := New()
 	// Buckets: 10,50,100,250,500,1000,2500,5000,10000, +Inf
-	m.ObserveLatency(5 * 1e6)   // 5s   -> 5000 bucket (index 7)
-	m.ObserveLatency(20)        // 20us -> 0.02ms -> 50 bucket (index 1)
-	m.ObserveLatency(2 * 1e9)   // 2s   -> 2000ms -> 2500 bucket (index 6)
+	m.ObserveLatency(5 * 1e6) // 5s   -> 5000 bucket (index 7)
+	m.ObserveLatency(20)      // 20us -> 0.02ms -> 50 bucket (index 1)
+	m.ObserveLatency(2 * 1e9) // 2s   -> 2000ms -> 2500 bucket (index 6)
 	d := m.Dimensions()
 	if d.HistCount != 3 {
 		t.Fatalf("count = %d, want 3", d.HistCount)
