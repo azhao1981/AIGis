@@ -31,7 +31,7 @@ func TestCapabilitiesMiddlewareExtendsPanels(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &c); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	want := []string{"status", "routes", "keys", "usage", "audit"}
+	want := []string{"status", "routes", "masking", "keys", "usage", "audit"}
 	if len(c.Panels) != len(want) {
 		t.Fatalf("panels = %v, want %v", c.Panels, want)
 	}
